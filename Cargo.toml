@@ -1,7 +1,14 @@
 [package]
 name = "flowdb"
 version = "0.1.4"
-edition = "2021"
+edition = "2024"
+authors = ["jinti<shenjindi@fourz.cn>"]
+repository = "https://github.com/restsend/flowdb"
+description = "A time-series database for VOIP flows, written in Rust."
+readme = "README.md"
+keywords = ["voip", "time-series", "database", "rust"]
+categories = ["databases"]
+license = "MIT"
 
 [features]
 default = ["server"]
