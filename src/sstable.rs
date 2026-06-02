@@ -69,7 +69,7 @@ impl BlockHeader {
                 return Err(FlowError::InvalidMagic {
                     expected: BLOCK_MAGIC_LZ4,
                     actual: magic,
-                })
+                });
             }
         };
         Ok(Self {

@@ -5,13 +5,13 @@ use crate::record::{Query as DbQuery, Record};
 use crate::stats::EngineStats;
 use axum::extract::DefaultBodyLimit;
 use axum::{
+    Json, Router,
     body::Bytes,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
     routing::{delete, get, patch, post},
-    Json, Router,
 };
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -1,5 +1,5 @@
 use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
+    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
 use flowdb::{Config, Engine, Query, Record};
 use std::collections::BTreeMap;

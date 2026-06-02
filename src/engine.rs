@@ -388,7 +388,7 @@ impl Engine {
                 return Err(crate::error::FlowError::Other(format!(
                     "record not found: key={}, ts={}",
                     key, ts
-                )))
+                )));
             }
         };
 
@@ -651,7 +651,7 @@ impl ScanIterator {
         };
 
         let is_full_scan = (matches!(&query.key_filter, KeyFilter::All)
-            || matches!(&query.key_filter, KeyFilter::Prefix(ref p) if p.is_empty()))
+            || matches!(&query.key_filter, KeyFilter::Prefix(p) if p.is_empty()))
             && query.time_range.is_none();
 
         // 4) Snapshot SST readers

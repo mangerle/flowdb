@@ -2,8 +2,8 @@ use crate::record::InternalRecord;
 use lru::LruCache;
 use parking_lot::RwLock;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const NUM_SHARDS: usize = 64;
 

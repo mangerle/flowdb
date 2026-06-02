@@ -3,7 +3,7 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use flowdb::auth::AuthState;
-use flowdb::http::{build_router, AppState};
+use flowdb::http::{AppState, build_router};
 use flowdb::{Config, Engine, Record};
 use std::sync::Arc;
 use tempfile::TempDir;

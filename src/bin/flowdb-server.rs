@@ -1,6 +1,6 @@
 use clap::Parser;
 use flowdb::auth::AuthState;
-use flowdb::http::{start_http_server, AppState};
+use flowdb::http::{AppState, start_http_server};
 use flowdb::udp::start_udp_listener;
 use flowdb::{Engine, ServerConfig};
 use std::sync::Arc;

@@ -1,7 +1,7 @@
 use flowdb::{Config, Engine, Query, Record};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 fn make_temp_dir() -> std::path::PathBuf {
