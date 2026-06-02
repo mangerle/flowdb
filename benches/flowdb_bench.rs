@@ -1,8 +1,7 @@
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
-};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use flowdb::{Config, Engine, Query, Record};
 use std::collections::BTreeMap;
+use std::hint::black_box;
 use std::io::Write;
 use std::path::Path;
 use tempfile::TempDir;
@@ -85,11 +84,9 @@ fn wal_decode_record(data: &[u8]) -> Option<(BenchRecord, usize)> {
     if data.len() < 8 + 2 {
         return None;
     }
-    let _seq = u64::from_be_bytes([
-        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-    ]);
+    let _seq = u64::from_be_bytes(data[..8].try_into().unwrap());
     pos += 8;
-    let key_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+    let key_len = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
     pos += 2;
     if pos + key_len > data.len() {
         return None;
@@ -99,33 +96,14 @@ fn wal_decode_record(data: &[u8]) -> Option<(BenchRecord, usize)> {
     if pos + 16 > data.len() {
         return None;
     }
-    let ts = i64::from_be_bytes([
-        data[pos],
-        data[pos + 1],
-        data[pos + 2],
-        data[pos + 3],
-        data[pos + 4],
-        data[pos + 5],
-        data[pos + 6],
-        data[pos + 7],
-    ]);
+    let ts = i64::from_be_bytes(data[pos..pos + 8].try_into().unwrap());
     pos += 8;
-    let expire_at = i64::from_be_bytes([
-        data[pos],
-        data[pos + 1],
-        data[pos + 2],
-        data[pos + 3],
-        data[pos + 4],
-        data[pos + 5],
-        data[pos + 6],
-        data[pos + 7],
-    ]);
+    let expire_at = i64::from_be_bytes(data[pos..pos + 8].try_into().unwrap());
     pos += 8;
     if pos + 4 > data.len() {
         return None;
     }
-    let val_len =
-        u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+    let val_len = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
     pos += 4;
     if pos + val_len + 4 > data.len() {
         return None;
@@ -213,7 +191,7 @@ fn sst_decode_records(data: &[u8], count: usize) -> Vec<BenchRecord> {
         if pos + 2 > data.len() {
             break;
         }
-        let key_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        let key_len = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
         pos += 2;
         if pos + key_len > data.len() {
             break;
@@ -223,33 +201,14 @@ fn sst_decode_records(data: &[u8], count: usize) -> Vec<BenchRecord> {
         if pos + 16 > data.len() {
             break;
         }
-        let ts = i64::from_be_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-            data[pos + 4],
-            data[pos + 5],
-            data[pos + 6],
-            data[pos + 7],
-        ]);
+        let ts = i64::from_be_bytes(data[pos..pos + 8].try_into().unwrap());
         pos += 8;
-        let expire_at = i64::from_be_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-            data[pos + 4],
-            data[pos + 5],
-            data[pos + 6],
-            data[pos + 7],
-        ]);
+        let expire_at = i64::from_be_bytes(data[pos..pos + 8].try_into().unwrap());
         pos += 8;
         if pos + 4 > data.len() {
             break;
         }
-        let val_len =
-            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let val_len = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         if pos + val_len > data.len() {
             break;
@@ -669,24 +628,14 @@ fn bench_sstable(c: &mut Criterion) {
                     let mut all_records = Vec::new();
                     for &blk_offset in &block_offsets {
                         let pos = blk_offset as usize;
-                        let _num_records = u32::from_be_bytes([
-                            file_data[pos + 4],
-                            file_data[pos + 5],
-                            file_data[pos + 6],
-                            file_data[pos + 7],
-                        ]);
-                        let compressed_len = u32::from_be_bytes([
-                            file_data[pos + 44],
-                            file_data[pos + 45],
-                            file_data[pos + 46],
-                            file_data[pos + 47],
-                        ]) as usize;
-                        let data_len = u32::from_be_bytes([
-                            file_data[pos + 40],
-                            file_data[pos + 41],
-                            file_data[pos + 42],
-                            file_data[pos + 43],
-                        ]) as usize;
+                        let _num_records =
+                            u32::from_be_bytes(file_data[pos + 4..pos + 8].try_into().unwrap());
+                        let compressed_len =
+                            u32::from_be_bytes(file_data[pos + 44..pos + 48].try_into().unwrap())
+                                as usize;
+                        let data_len =
+                            u32::from_be_bytes(file_data[pos + 40..pos + 44].try_into().unwrap())
+                                as usize;
                         let compressed_start = pos + HEADER_SIZE;
                         let compressed_end = compressed_start + compressed_len;
                         let raw = zstd::bulk::decompress(

@@ -493,10 +493,7 @@ impl Engine {
         Ok(())
     }
 
-    // ──────────────────────────────────────────────────────
     // New iterator-based scan API (RocksDB-style)
-    // ──────────────────────────────────────────────────────
-
     /// Lazy iterator scan with default `ReadOptions`.
     pub fn scan(&self, range: ScanRange) -> Result<ScanIterator> {
         self.scan_opt(range, &ReadOptions::default())
@@ -556,10 +553,7 @@ impl Engine {
     }
 }
 
-// ──────────────────────────────────────────────────────────────
-// ScanIterator — lazy merging iterator over memtables + SST blocks
-// ──────────────────────────────────────────────────────────────
-
+/// ScanIterator — lazy merging iterator over memtables + SST blocks
 /// Lazy iterator yielding `Result<Record>` in `(key, ts)` ascending order.
 ///
 /// Constructed via `Engine::scan()`, `Engine::scan_prefix()`,

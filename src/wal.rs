@@ -243,6 +243,9 @@ impl Wal {
     }
 }
 
+/// Encodes multiple records into a single binary buffer (big-endian).
+/// Each record is appended sequentially via `encode_record`. Returns the
+/// buffer and the total estimated memory footprint.
 pub(crate) fn encode_batch(records: &[InternalRecord]) -> (Vec<u8>, u64) {
     let mut buf = Vec::with_capacity(records.len() * 80);
     let mut total_mem_bytes: u64 = 0;
@@ -253,6 +256,7 @@ pub(crate) fn encode_batch(records: &[InternalRecord]) -> (Vec<u8>, u64) {
     (buf, total_mem_bytes)
 }
 
+/// Returns the exact encoded byte size of a single `InternalRecord`.
 pub(crate) fn encoded_size(rec: &InternalRecord) -> usize {
     8 + 1
         + 2
@@ -265,6 +269,9 @@ pub(crate) fn encoded_size(rec: &InternalRecord) -> usize {
         + rec.value.len()
 }
 
+/// Encodes a single record into `buf` in big-endian format.
+/// Layout: seq(8) | op(1) | key_len(2) | key | ts(8) | expire_at(8) |
+///         range_end_len(4) | range_end | val_len(4) | value
 pub(crate) fn encode_record(rec: &InternalRecord, buf: &mut Vec<u8>) {
     buf.reserve(encoded_size(rec));
     buf.extend_from_slice(&rec.seq.to_be_bytes());
@@ -286,6 +293,9 @@ pub(crate) fn encode_record(rec: &InternalRecord, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&rec.value);
 }
 
+/// Decodes one `InternalRecord` from the front of `data`.
+/// Uses the `read_*` helpers which convert via `data[..N].try_into().unwrap()`.
+/// Returns `(record, bytes_consumed)` or `None` if data is truncated.
 fn decode_record(data: &[u8]) -> Result<Option<(InternalRecord, usize)>> {
     let mut pos = 0;
     if data.len() < 8 + 1 + 2 {
@@ -353,24 +363,25 @@ fn decode_record(data: &[u8]) -> Result<Option<(InternalRecord, usize)>> {
     )))
 }
 
+/// Reads 8 bytes as big-endian u64 via `try_into().unwrap()`.
+/// Callers guarantee the slice is at least 8 bytes long.
 fn read_u64(data: &[u8]) -> u64 {
-    u64::from_be_bytes([
-        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-    ])
+    u64::from_be_bytes(data[..8].try_into().unwrap())
 }
 
+/// Reads 8 bytes as big-endian i64 via `try_into().unwrap()`.
 fn read_i64(data: &[u8]) -> i64 {
-    i64::from_be_bytes([
-        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-    ])
+    i64::from_be_bytes(data[..8].try_into().unwrap())
 }
 
+/// Reads 4 bytes as big-endian u32 via `try_into().unwrap()`.
 fn read_u32(data: &[u8]) -> u32 {
-    u32::from_be_bytes([data[0], data[1], data[2], data[3]])
+    u32::from_be_bytes(data[..4].try_into().unwrap())
 }
 
+/// Reads 2 bytes as big-endian u16 via `try_into().unwrap()`.
 fn read_u16(data: &[u8]) -> u16 {
-    u16::from_be_bytes([data[0], data[1]])
+    u16::from_be_bytes(data[..2].try_into().unwrap())
 }
 
 #[cfg(test)]
@@ -378,6 +389,40 @@ mod tests {
     use super::*;
     use crate::record::Record;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_read_u64() {
+        let n: u64 = 0x0102030405060708;
+        let bytes = n.to_be_bytes();
+        assert_eq!(read_u64(&bytes), n);
+    }
+
+    #[test]
+    fn test_read_i64() {
+        let n: i64 = -0x0102030405060708;
+        let bytes = n.to_be_bytes();
+        assert_eq!(read_i64(&bytes), n);
+    }
+
+    #[test]
+    fn test_read_u32() {
+        let n: u32 = 0x01020304;
+        let bytes = n.to_be_bytes();
+        assert_eq!(read_u32(&bytes), n);
+    }
+
+    #[test]
+    fn test_read_u16() {
+        let n: u16 = 0x0102;
+        let bytes = n.to_be_bytes();
+        assert_eq!(read_u16(&bytes), n);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn test_read_u64_panics_on_short_slice() {
+        read_u64(&[1, 2, 3]);
+    }
 
     fn make_record(key: &str, ts: i64, seq: u64) -> InternalRecord {
         InternalRecord::from_record(

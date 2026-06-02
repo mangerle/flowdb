@@ -1,6 +1,6 @@
 [package]
 name = "flowdb"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 authors = ["jinti<shenjindi@fourz.cn>"]
 repository = "https://github.com/restsend/flowdb"
@@ -36,23 +36,23 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 thiserror = "2"
 hdrhistogram = "7"
-toml = "0.8"
+toml = "1.1.2"
 memmap2 = "0.9"
 axum = { version = "0.8", optional = true }
 tower-http = { version = "0.6", features = ["cors", "trace"], optional = true }
 base64 = { version = "0.22", optional = true }
 clap = { version = "4", features = ["derive"] }
 tracing-subscriber = "0.3"
-lru = "0.12"
+lru = "0.18"
 ahash = "0.8"
-lz4_flex = "0.11"
+lz4_flex = "0.13.1"
 
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
-criterion = "0.5"
+criterion = "0.8.2"
 arbitrary = { version = "1", features = ["derive"] }
-rocksdb = "0.23"
+rocksdb = "0.24"
 
 [[bench]]
 name = "flowdb_bench"

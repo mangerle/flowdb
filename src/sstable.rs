@@ -28,6 +28,9 @@ pub(crate) struct BlockHeader {
 }
 
 impl BlockHeader {
+    /// Serialises the header into a fixed-size big-endian byte array (48 bytes).
+    /// Layout: magic(4) | num_records(4) | min_ts(8) | max_ts(8) |
+    ///         min_expire(8) | max_expire(8) | data_len(4) | compressed_len(4)
     pub fn to_bytes(&self) -> [u8; HEADER_SIZE] {
         let magic = if self.is_zstd {
             BLOCK_MAGIC_ZSTD
@@ -54,6 +57,9 @@ impl BlockHeader {
         buf
     }
 
+    /// Parses a `BlockHeader` from a big-endian 48-byte slice.
+    /// Each field is read via `data[i..j].try_into().unwrap()` — the length
+    /// check against `HEADER_SIZE` guarantees the conversion never panics.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         if data.len() < HEADER_SIZE {
             return Err(FlowError::Corruption {
@@ -61,7 +67,7 @@ impl BlockHeader {
                 msg: "block header too short".into(),
             });
         }
-        let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        let magic = u32::from_be_bytes(data[..4].try_into().unwrap());
         let is_zstd = match magic {
             BLOCK_MAGIC_LZ4 => false,
             BLOCK_MAGIC_ZSTD => true,
@@ -73,21 +79,13 @@ impl BlockHeader {
             }
         };
         Ok(Self {
-            num_records: u32::from_be_bytes([data[4], data[5], data[6], data[7]]),
-            min_ts: i64::from_be_bytes([
-                data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
-            ]),
-            max_ts: i64::from_be_bytes([
-                data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
-            ]),
-            min_expire: i64::from_be_bytes([
-                data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
-            ]),
-            max_expire: i64::from_be_bytes([
-                data[32], data[33], data[34], data[35], data[36], data[37], data[38], data[39],
-            ]),
-            data_len: u32::from_be_bytes([data[40], data[41], data[42], data[43]]),
-            compressed_len: u32::from_be_bytes([data[44], data[45], data[46], data[47]]),
+            num_records: u32::from_be_bytes(data[4..8].try_into().unwrap()),
+            min_ts: i64::from_be_bytes(data[8..16].try_into().unwrap()),
+            max_ts: i64::from_be_bytes(data[16..24].try_into().unwrap()),
+            min_expire: i64::from_be_bytes(data[24..32].try_into().unwrap()),
+            max_expire: i64::from_be_bytes(data[32..40].try_into().unwrap()),
+            data_len: u32::from_be_bytes(data[40..44].try_into().unwrap()),
+            compressed_len: u32::from_be_bytes(data[44..48].try_into().unwrap()),
             is_zstd,
         })
     }
@@ -103,6 +101,9 @@ fn decompress_block(data: &[u8], header: &BlockHeader) -> Result<Vec<u8>> {
     }
 }
 
+/// Encodes records into a compact binary buffer (big-endian, no compression).
+/// Per-record layout: key_len(2) | key | ts(8) | expire_at(8) | op(1) |
+///                    range_end_len(2) | range_end | val_len(4) | value
 fn encode_records(records: &[InternalRecord]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(records.len() * 64);
     for rec in records {
@@ -126,6 +127,9 @@ fn encode_records(records: &[InternalRecord]) -> Vec<u8> {
     buf
 }
 
+/// Decodes `count` records from a big-endian byte slice.
+/// Integer fields are read via `data[pos..pos+N].try_into().unwrap()` after
+/// an explicit bounds check, so the unwrap is guaranteed safe.
 fn decode_records(data: &[u8], count: u32) -> Result<Vec<InternalRecord>> {
     let mut records = Vec::with_capacity(count as usize);
     let mut pos = 0;
@@ -133,7 +137,7 @@ fn decode_records(data: &[u8], count: u32) -> Result<Vec<InternalRecord>> {
         if pos + 2 > data.len() {
             break;
         }
-        let key_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        let key_len = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
         pos += 2;
         if pos + key_len > data.len() {
             break;
@@ -144,27 +148,9 @@ fn decode_records(data: &[u8], count: u32) -> Result<Vec<InternalRecord>> {
         if pos + 17 > data.len() {
             break;
         }
-        let ts = i64::from_be_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-            data[pos + 4],
-            data[pos + 5],
-            data[pos + 6],
-            data[pos + 7],
-        ]);
+        let ts = i64::from_be_bytes(data[pos..pos + 8].try_into().unwrap());
         pos += 8;
-        let expire_at = i64::from_be_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-            data[pos + 4],
-            data[pos + 5],
-            data[pos + 6],
-            data[pos + 7],
-        ]);
+        let expire_at = i64::from_be_bytes(data[pos..pos + 8].try_into().unwrap());
         pos += 8;
         let op = Op::from_u8(data[pos]);
         pos += 1;
@@ -172,7 +158,7 @@ fn decode_records(data: &[u8], count: u32) -> Result<Vec<InternalRecord>> {
         if pos + 2 > data.len() {
             break;
         }
-        let re_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        let re_len = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
         pos += 2;
         let range_end = if re_len > 0 {
             if pos + re_len > data.len() {
@@ -188,8 +174,7 @@ fn decode_records(data: &[u8], count: u32) -> Result<Vec<InternalRecord>> {
         if pos + 4 > data.len() {
             break;
         }
-        let val_len =
-            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let val_len = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         if pos + val_len > data.len() {
             break;

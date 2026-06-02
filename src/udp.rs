@@ -10,44 +10,53 @@ const MAGIC: u8 = 0x54;
 const VERSION: u8 = 0x01;
 const TTL_NONE: u32 = 0;
 
+/// Hard cap on key/value lengths to prevent pathological allocations.
+const MAX_KEY_BYTES: usize = 4096;
+const MAX_VAL_BYTES: usize = 64 * 1024;
+
+/// Reads 2 bytes at `pos` as big-endian u16. Returns `None` if out of bounds.
+/// Conversion uses `data[pos..pos+2].try_into().unwrap()` — the bounds check
+/// guarantees the slice length matches the array size so the unwrap is safe.
 fn read_u16(data: &[u8], pos: usize) -> Option<(u16, usize)> {
     if pos + 2 > data.len() {
         return None;
     }
-    Some((u16::from_be_bytes([data[pos], data[pos + 1]]), pos + 2))
+    Some((
+        u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()),
+        pos + 2,
+    ))
 }
 
+/// Reads 4 bytes at `pos` as big-endian u32 with bounds checking.
 fn read_u32(data: &[u8], pos: usize) -> Option<(u32, usize)> {
     if pos + 4 > data.len() {
         return None;
     }
     Some((
-        u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]),
+        u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap()),
         pos + 4,
     ))
 }
 
+/// Reads 8 bytes at `pos` as big-endian i64 with bounds checking.
 fn read_i64(data: &[u8], pos: usize) -> Option<(i64, usize)> {
     if pos + 8 > data.len() {
         return None;
     }
     Some((
-        i64::from_be_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-            data[pos + 4],
-            data[pos + 5],
-            data[pos + 6],
-            data[pos + 7],
-        ]),
+        i64::from_be_bytes(data[pos..pos + 8].try_into().unwrap()),
         pos + 8,
     ))
 }
 
+/// Decodes a single `Record` from `data` at `pos`. Uses the bounded `read_*`
+/// helpers which internally apply `data[pos..pos+N].try_into().unwrap()` after
+/// verifying the slice is long enough.
 fn read_record(data: &[u8], mut pos: usize) -> Option<(Record, usize)> {
     let (key_len, p) = read_u16(data, pos)?;
+    if key_len as usize > MAX_KEY_BYTES {
+        return None;
+    }
     pos = p;
     if pos + key_len as usize > data.len() {
         return None;
@@ -62,6 +71,9 @@ fn read_record(data: &[u8], mut pos: usize) -> Option<(Record, usize)> {
     pos = p;
 
     let (val_len, p) = read_u16(data, pos)?;
+    if val_len as usize > MAX_VAL_BYTES {
+        return None;
+    }
     pos = p;
     if pos + val_len as usize > data.len() {
         return None;
@@ -86,6 +98,8 @@ fn read_record(data: &[u8], mut pos: usize) -> Option<(Record, usize)> {
     ))
 }
 
+/// Decodes a UDP frame containing one or more records (big-endian binary format).
+/// Frame layout: magic(1) | version(1) | count(2) | records...
 pub fn decode_frame(data: &[u8]) -> Result<Vec<Record>> {
     if data.len() < 4 {
         return Err(FlowError::Other("frame too short".into()));
@@ -99,9 +113,12 @@ pub fn decode_frame(data: &[u8]) -> Result<Vec<Record>> {
             data[1]
         )));
     }
-    let (count, mut pos) = read_u16(data, 2).unwrap();
+    let (raw_count, mut pos) = read_u16(data, 2).unwrap();
+    // Cap declared record count to prevent amplification attacks.
+    // The existing bounds checks in read_record handle actual data truncation.
+    let count = (raw_count as usize).min(1024);
 
-    let mut records = Vec::with_capacity(count as usize);
+    let mut records = Vec::with_capacity(count);
     for _ in 0..count {
         let (rec, p) =
             read_record(data, pos).ok_or_else(|| FlowError::Other("truncated record".into()))?;
@@ -112,6 +129,8 @@ pub fn decode_frame(data: &[u8]) -> Result<Vec<Record>> {
     Ok(records)
 }
 
+/// Encodes records into a UDP frame (big-endian binary format).
+/// Each record: key_len(2) | key | ts(8) | ttl(4) | val_len(2) | value
 pub fn encode_frame(records: &[Record]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(64 * records.len());
     buf.push(MAGIC);
@@ -248,5 +267,56 @@ mod tests {
     fn test_decode_truncated() {
         assert!(decode_frame(&[MAGIC, VERSION]).is_err());
         assert!(decode_frame(&[MAGIC, VERSION, 0x00, 0x01]).is_err());
+    }
+
+    #[test]
+    fn test_read_u16_with_position() {
+        let data = [0x01, 0x02, 0x03, 0x04];
+        let (v, pos) = read_u16(&data, 0).unwrap();
+        assert_eq!(v, 0x0102);
+        assert_eq!(pos, 2);
+
+        let (v, pos) = read_u16(&data, 2).unwrap();
+        assert_eq!(v, 0x0304);
+        assert_eq!(pos, 4);
+    }
+
+    #[test]
+    fn test_read_u16_oob() {
+        assert!(read_u16(&[0x01], 0).is_none());
+        assert!(read_u16(&[0x01, 0x02], 1).is_none());
+    }
+
+    #[test]
+    fn test_read_u32_with_position() {
+        let data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let (v, pos) = read_u32(&data, 0).unwrap();
+        assert_eq!(v, 0x01020304);
+        assert_eq!(pos, 4);
+
+        let (v, pos) = read_u32(&data, 4).unwrap();
+        assert_eq!(v, 0x05060708);
+        assert_eq!(pos, 8);
+    }
+
+    #[test]
+    fn test_read_u32_oob() {
+        assert!(read_u32(&[0; 3], 0).is_none());
+        assert!(read_u32(&[0; 4], 1).is_none());
+    }
+
+    #[test]
+    fn test_read_i64_with_position() {
+        let n: i64 = -0x0102030405060708;
+        let bytes = n.to_be_bytes();
+        let (v, pos) = read_i64(&bytes, 0).unwrap();
+        assert_eq!(v, n);
+        assert_eq!(pos, 8);
+    }
+
+    #[test]
+    fn test_read_i64_oob() {
+        assert!(read_i64(&[0; 7], 0).is_none());
+        assert!(read_i64(&[0; 8], 1).is_none());
     }
 }

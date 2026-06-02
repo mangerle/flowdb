@@ -330,9 +330,6 @@ impl ScanRange {
     }
 }
 
-/// Returns the next lexicographic prefix (increments last byte, or appends 0
-/// if all bytes are 0xFF). Used to convert `[prefix, ..)` into
-/// `(prefix, next_prefix)` for exclusive upper-bound scans.
 fn increment_prefix_bytes(key: &[u8]) -> Vec<u8> {
     let mut bytes = key.to_vec();
     while let Some(last) = bytes.last_mut() {
@@ -347,8 +344,6 @@ fn increment_prefix_bytes(key: &[u8]) -> Vec<u8> {
     sentinel
 }
 
-/// Checks whether `[start, end)` corresponds to a prefix range — i.e.
-/// `end == increment_prefix_bytes(start)`.
 fn is_prefix_range(start: &[u8], end: &[u8]) -> bool {
     end == increment_prefix_bytes(start)
 }
