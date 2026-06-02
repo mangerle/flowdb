@@ -4,10 +4,10 @@ version = "0.1.4"
 edition = "2024"
 authors = ["jinti<shenjindi@fourz.cn>"]
 repository = "https://github.com/restsend/flowdb"
-description = "A time-series database for VOIP flows, written in Rust."
+description = "A time-series database written in Rust, designed for high performance and low latency."
 readme = "README.md"
-keywords = ["voip", "time-series", "database", "rust"]
-categories = ["databases"]
+keywords = ["database", "embedded", "lsm-tree", "persistence", "time-series"]
+categories = ["database"]
 license = "MIT"
 
 [features]
