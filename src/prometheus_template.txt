@@ -1,0 +1,81 @@
+# HELP flowdb_records_written Total records written
+# TYPE flowdb_records_written counter
+flowdb_records_written {}
+# HELP flowdb_bytes_written Total bytes written
+# TYPE flowdb_bytes_written counter
+flowdb_bytes_written {}
+# HELP flowdb_records_read Total records read
+# TYPE flowdb_records_read counter
+flowdb_records_read {}
+# HELP flowdb_records_expired Total records expired
+# TYPE flowdb_records_expired counter
+flowdb_records_expired {}
+# HELP flowdb_flushes_total Total flushes
+# TYPE flowdb_flushes_total counter
+flowdb_flushes_total {}
+# HELP flowdb_gc_runs_total Total GC runs
+# TYPE flowdb_gc_runs_total counter
+flowdb_gc_runs_total {}
+# HELP flowdb_compaction_runs_total Total compaction runs
+# TYPE flowdb_compaction_runs_total counter
+flowdb_compaction_runs_total {}
+# HELP flowdb_records_purged_by_gc Records purged by GC
+# TYPE flowdb_records_purged_by_gc counter
+flowdb_records_purged_by_gc {}
+# HELP flowdb_udp_packets_received UDP packets received
+# TYPE flowdb_udp_packets_received counter
+flowdb_udp_packets_received {}
+# HELP flowdb_udp_packets_dropped UDP packets dropped
+# TYPE flowdb_udp_packets_dropped counter
+flowdb_udp_packets_dropped {}
+# HELP flowdb_http_requests_total HTTP requests total
+# TYPE flowdb_http_requests_total counter
+flowdb_http_requests_total {}
+# HELP flowdb_memtable_records Current memtable records
+# TYPE flowdb_memtable_records gauge
+flowdb_memtable_records {}
+# HELP flowdb_memtable_bytes Current memtable bytes
+# TYPE flowdb_memtable_bytes gauge
+flowdb_memtable_bytes {}
+# HELP flowdb_frozen_memtable_count Frozen memtable count
+# TYPE flowdb_frozen_memtable_count gauge
+flowdb_frozen_memtable_count {}
+# HELP flowdb_sstable_count SSTable count
+# TYPE flowdb_sstable_count gauge
+flowdb_sstable_count {}
+# HELP flowdb_sstable_bytes SSTable total bytes
+# TYPE flowdb_sstable_bytes gauge
+flowdb_sstable_bytes {}
+# HELP flowdb_wal_bytes WAL bytes
+# TYPE flowdb_wal_bytes gauge
+flowdb_wal_bytes {}
+# HELP flowdb_block_meta_index_entries Block meta index entries
+# TYPE flowdb_block_meta_index_entries gauge
+flowdb_block_meta_index_entries {}
+# HELP flowdb_time_index_buckets Time index buckets
+# TYPE flowdb_time_index_buckets gauge
+flowdb_time_index_buckets {}
+# HELP flowdb_block_cache_hit_rate Block cache hit rate
+# TYPE flowdb_block_cache_hit_rate gauge
+flowdb_block_cache_hit_rate {}
+# HELP flowdb_compression_ratio Compression ratio
+# TYPE flowdb_compression_ratio gauge
+flowdb_compression_ratio {}
+# HELP flowdb_write_latency_us Write latency microseconds
+# TYPE flowdb_write_latency_us summary
+flowdb_write_latency_us{{quantile="0.5"}} {}
+flowdb_write_latency_us{{quantile="0.9"}} {}
+flowdb_write_latency_us{{quantile="0.99"}} {}
+# HELP flowdb_query_latency_us Query latency microseconds
+# TYPE flowdb_query_latency_us summary
+flowdb_query_latency_us{{quantile="0.5"}} {}
+flowdb_query_latency_us{{quantile="0.9"}} {}
+flowdb_query_latency_us{{quantile="0.99"}} {}
+# HELP flowdb_flush_latency_us Flush latency microseconds
+# TYPE flowdb_flush_latency_us summary
+flowdb_flush_latency_us{{quantile="0.5"}} {}
+flowdb_flush_latency_us{{quantile="0.9"}} {}
+flowdb_flush_latency_us{{quantile="0.99"}} {}
+# HELP flowdb_uptime_seconds Uptime in seconds
+# TYPE flowdb_uptime_seconds gauge
+flowdb_uptime_seconds {}
