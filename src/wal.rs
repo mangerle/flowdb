@@ -8,6 +8,7 @@ struct WalSegment {
     writer: std::io::BufWriter<std::fs::File>,
     path: PathBuf,
     written_bytes: u64,
+    max_seq: u64,
 }
 
 pub(crate) struct Wal {
@@ -55,13 +56,14 @@ impl Wal {
                 .read(true)
                 .append(true)
                 .open(path)?;
+            let seg_max_seq = self.find_max_seq_in_segment(path)?;
             self.segments.push(WalSegment {
                 writer: std::io::BufWriter::with_capacity(256 * 1024, file),
                 path: path.clone(),
                 written_bytes: 0,
+                max_seq: seg_max_seq,
             });
-            max_seq =
-                max_seq.max(self.find_max_seq_in_segment(&self.segments.last().unwrap().path)?);
+            max_seq = max_seq.max(seg_max_seq);
         }
 
         if max_seq > 0 {
@@ -132,10 +134,12 @@ impl Wal {
         let path = self.dir.join(&name);
         if path.exists() {
             let file = std::fs::OpenOptions::new().append(true).open(&path)?;
+            let max_seq = self.find_max_seq_in_segment(&path)?;
             self.segments.push(WalSegment {
                 writer: std::io::BufWriter::with_capacity(256 * 1024, file),
                 path,
                 written_bytes: 0,
+                max_seq,
             });
             return Ok(());
         }
@@ -147,6 +151,7 @@ impl Wal {
             writer: std::io::BufWriter::with_capacity(256 * 1024, file),
             path,
             written_bytes: 0,
+            max_seq: 0,
         });
         Ok(())
     }
@@ -158,7 +163,7 @@ impl Wal {
         Ok(())
     }
 
-    pub fn write_encoded(&mut self, buf: &[u8]) -> Result<()> {
+    pub fn write_encoded(&mut self, buf: &[u8], batch_max_seq: u64) -> Result<()> {
         if self.segments.is_empty() {
             self.create_new_segment(self.next_segment_id)?;
         }
@@ -170,6 +175,9 @@ impl Wal {
 
         seg.writer.write_all(buf)?;
         seg.written_bytes += buf.len() as u64;
+        if batch_max_seq > seg.max_seq {
+            seg.max_seq = batch_max_seq;
+        }
 
         if seg.written_bytes >= self.max_segment_bytes {
             seg.writer.flush()?;
@@ -208,27 +216,11 @@ impl Wal {
         let to_delete: Vec<PathBuf> = self
             .segments
             .iter()
-            .filter(|s| {
-                let s_seq = s
-                    .path
-                    .file_stem()
-                    .and_then(|n| n.to_str())
-                    .and_then(|n| n.parse::<u64>().ok())
-                    .unwrap_or(0);
-                s_seq > 0 && s_seq < seq
-            })
+            .filter(|s| s.max_seq > 0 && s.max_seq < seq)
             .map(|s| s.path.clone())
             .collect();
 
-        self.segments.retain(|s| {
-            let s_seq = s
-                .path
-                .file_stem()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.parse::<u64>().ok())
-                .unwrap_or(0);
-            s_seq == 0 || s_seq >= seq
-        });
+        self.segments.retain(|s| s.max_seq == 0 || s.max_seq >= seq);
 
         if self.segments.is_empty() {
             let id = self.next_segment_id;
@@ -443,7 +435,7 @@ mod tests {
 
         let recs = vec![make_record("key1", 100, 1), make_record("key2", 200, 2)];
         let (buf, _) = encode_batch(&recs);
-        wal.write_encoded(&buf).unwrap();
+        wal.write_encoded(&buf, 2).unwrap();
 
         let result = wal.replay_from(0).unwrap();
         assert_eq!(result.len(), 2);
@@ -458,7 +450,7 @@ mod tests {
 
         let recs = vec![make_record("key1", 100, 1), make_record("key2", 200, 2)];
         let (buf, _) = encode_batch(&recs);
-        wal.write_encoded(&buf).unwrap();
+        wal.write_encoded(&buf, 2).unwrap();
 
         let result = wal.replay_from(1).unwrap();
         assert_eq!(result.len(), 1);
@@ -472,7 +464,7 @@ mod tests {
 
         let recs = vec![make_record("key1", 100, 1)];
         let (buf, _) = encode_batch(&recs);
-        wal.write_encoded(&buf).unwrap();
+        wal.write_encoded(&buf, 1).unwrap();
 
         let seg = wal.segments.first().unwrap();
         let path = seg.path.clone();
@@ -499,7 +491,7 @@ mod tests {
                 make_record("c", 3, 3),
             ];
             let (buf, _) = encode_batch(&recs);
-            wal.write_encoded(&buf).unwrap();
+            wal.write_encoded(&buf, 3).unwrap();
         }
 
         {
@@ -531,7 +523,7 @@ mod tests {
         let recs = vec![make_record("k1", 10, 1)];
         let (buf, _) = encode_batch(&recs);
         let len = buf.len();
-        wal.write_encoded(&buf).unwrap();
+        wal.write_encoded(&buf, 1).unwrap();
 
         let result = wal.replay_from(0).unwrap();
         assert_eq!(result.len(), 1);
@@ -563,11 +555,119 @@ mod tests {
                 (i + 1) as u64,
             );
             let (buf, _) = encode_batch(&[rec]);
-            wal.write_encoded(&buf).unwrap();
+            wal.write_encoded(&buf, (i + 1) as u64).unwrap();
         }
 
         let result = wal.replay_from(0).unwrap();
         assert_eq!(result.len(), 20);
         assert_eq!(wal.segments.len(), 2);
+    }
+
+    #[test]
+    fn test_wal_truncate_before_preserves_recent() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = Wal::open(dir.path(), 1).unwrap();
+
+        let big_val = vec![0u8; 100_000];
+
+        // Batch 1: 11 records (~1.1MB) — fills first segment, triggers rollover.
+        // Each record is ~100K. After 11 writes, written_bytes > 1MB → rollover.
+        for i in 0..11 {
+            let seq = (i + 1) as u64;
+            let rec = InternalRecord::from_record(
+                &Record {
+                    key: format!("old_{:04}", i),
+                    ts: i as i64,
+                    expire_at: i64::MAX,
+                    value: big_val.clone(),
+                },
+                seq,
+            );
+            let (buf, _) = encode_batch(&[rec]);
+            wal.write_encoded(&buf, seq).unwrap();
+        }
+        assert!(wal.segments.len() >= 2, "segment should have rolled over");
+
+        // Batch 2: 5 records into the second segment.
+        for i in 0..5 {
+            let seq = (100 + i) as u64;
+            let rec = InternalRecord::from_record(
+                &Record {
+                    key: format!("new_{:04}", i),
+                    ts: (100 + i) as i64,
+                    expire_at: i64::MAX,
+                    value: big_val.clone(),
+                },
+                seq,
+            );
+            let (buf, _) = encode_batch(&[rec]);
+            wal.write_encoded(&buf, seq).unwrap();
+        }
+
+        // Segment 1: max_seq = 11.  Segment 2: max_seq = 104.
+        wal.truncate_before(50).unwrap();
+
+        let replayed = wal.replay_from(0).unwrap();
+        let keys: Vec<String> = replayed
+            .iter()
+            .map(|r| unsafe { String::from_utf8_unchecked(r.key.clone()) })
+            .collect();
+
+        assert!(
+            keys.iter().all(|k| !k.starts_with("old_")),
+            "old segment (max_seq=11 < 50) must be deleted, got: {:?}",
+            keys
+        );
+        assert!(
+            keys.iter().any(|k| k.starts_with("new_")),
+            "new segment (max_seq=104 >= 50) must survive, got: {:?}",
+            keys
+        );
+    }
+
+    #[test]
+    fn test_wal_truncate_before_across_segments() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = Wal::open(dir.path(), 1).unwrap();
+
+        // Each record ~100K → forces segment rollover at 1MB.
+        let big_val = vec![0u8; 100_000];
+        for i in 0..20 {
+            let seq = (i + 1) as u64;
+            let rec = InternalRecord::from_record(
+                &Record {
+                    key: format!("key_{:04}", i),
+                    ts: i as i64,
+                    expire_at: i64::MAX,
+                    value: big_val.clone(),
+                },
+                seq,
+            );
+            let (buf, _) = encode_batch(&[rec]);
+            wal.write_encoded(&buf, seq).unwrap();
+        }
+
+        let seg_count_before = wal.segments.len();
+        assert!(seg_count_before >= 2, "need multiple segments");
+
+        // Truncate everything before seq 16.
+        wal.truncate_before(16).unwrap();
+
+        // At least one segment should have been removed.
+        assert!(
+            wal.segments.len() < seg_count_before,
+            "some segments should have been removed ({} -> {})",
+            seg_count_before,
+            wal.segments.len()
+        );
+
+        let replayed = wal.replay_from(0).unwrap();
+        let seqs: Vec<u64> = replayed.iter().map(|r| r.seq).collect();
+
+        // The surviving segment(s) contain the last batch of writes.
+        // Verify the highest seq always survives.
+        assert!(seqs.contains(&20), "seq 20 (latest) must always survive");
+        // Very old seqs should be gone.
+        assert!(!seqs.contains(&1), "seq 1 should be gone (was in an old segment)");
     }
 }

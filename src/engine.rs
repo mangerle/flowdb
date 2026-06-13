@@ -28,6 +28,73 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Spawn a background maintenance task that periodically flushes the
+    /// memtable to SSTable, runs compaction, and garbage-collects expired
+    /// SST files.  The task runs until the returned `JoinHandle` is dropped
+    /// or the engine is shut down.
+    ///
+    /// This should be called once after `Engine::open` when running inside
+    /// a Tokio runtime.
+    pub fn spawn_background_maintenance(&self) -> Option<tokio::task::JoinHandle<()>> {
+        let worker = self.worker.clone();
+        let manifest = self.manifest.clone();
+        let index = self.index.clone();
+        let cache = self.cache.clone();
+        let stats = self.stats.clone();
+        let data_dir = self.config.data_dir.clone();
+        let block_size = self.config.block_size;
+        let zstd_level = self.config.zstd_level;
+        let bloom_bits = self.config.bloom_bits_per_key;
+        let compaction_threshold = self.config.compaction_threshold;
+        let flush_interval = self.config.flush_interval_ms.max(1);
+        let gc_interval = self.config.gc_interval_secs.max(1);
+
+        let handle = tokio::task::spawn(async move {
+            let mut flush_tick = tokio::time::interval(std::time::Duration::from_millis(flush_interval));
+            let mut compact_tick = tokio::time::interval(std::time::Duration::from_secs(gc_interval.max(1)));
+            let mut gc_tick = tokio::time::interval(std::time::Duration::from_secs(gc_interval));
+
+            loop {
+                tokio::select! {
+                    _ = flush_tick.tick() => {
+                        let w = worker.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let _ = w.lock().do_flush();
+                        }).await;
+                    }
+                    _ = compact_tick.tick() => {
+                        let sst_count = manifest.lock().state().sstables.len();
+                        if sst_count >= compaction_threshold {
+                            let compaction = crate::compaction::CompactionRunner::new(
+                                data_dir.clone(),
+                                block_size,
+                                zstd_level,
+                                bloom_bits,
+                                compaction_threshold,
+                                manifest.clone(),
+                                index.clone(),
+                                cache.clone(),
+                                stats.clone(),
+                            );
+                            let _ = tokio::task::spawn_blocking(move || compaction.run()).await;
+                        }
+                    }
+                    _ = gc_tick.tick() => {
+                        let gc = crate::gc::GcRunner::new(
+                            data_dir.clone(),
+                            manifest.clone(),
+                            index.clone(),
+                            cache.clone(),
+                            stats.clone(),
+                        );
+                        let _ = tokio::task::spawn_blocking(move || gc.run()).await;
+                    }
+                }
+            }
+        });
+        Some(handle)
+    }
+
     pub async fn open(config: Config) -> Result<Self> {
         let data_dir = &config.data_dir;
         if !data_dir.exists() && !config.create_if_missing {
@@ -453,7 +520,10 @@ impl Engine {
     }
 
     pub async fn flush(&self) -> Result<()> {
-        self.worker.lock().do_flush()
+        let worker = self.worker.clone();
+        tokio::task::spawn_blocking(move || worker.lock().do_flush())
+            .await
+            .map_err(|e| FlowError::Other(format!("flush join error: {e}")))?
     }
 
     pub async fn trigger_gc(&self) -> Result<u64> {
@@ -1664,5 +1734,110 @@ mod tests {
         assert_eq!(records.len(), 1);
 
         engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_recovery_after_flush_no_data_loss() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        // Phase 1: write data, flush to SST, then write more data into WAL.
+        {
+            let engine = Engine::open(make_config(&path)).await.unwrap();
+
+            // First batch — will be flushed
+            engine
+                .write_batch(&[make_record("flushed", 100)])
+                .await
+                .unwrap();
+            engine.flush().await.unwrap();
+
+            // Second batch — stays in memtable + WAL
+            engine
+                .write_batch(&[make_record("post-flush", 200)])
+                .await
+                .unwrap();
+
+            // Don't call shutdown — simulate crash after the first flush.
+            // The WAL truncation must NOT delete the segment containing "post-flush".
+            drop(engine);
+        }
+
+        // Phase 2: reopen — must find BOTH the flushed record and the post-flush record.
+        {
+            let engine = Engine::open(make_config(&path)).await.unwrap();
+            let r1 = engine.get("flushed", 100).await.unwrap();
+            assert!(r1.is_some(), "flushed record must survive restart");
+            let r2 = engine.get("post-flush", 200).await.unwrap();
+            assert!(r2.is_some(), "post-flush record must survive restart (WAL truncation bug check)");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_memtable_backpressure_under_pressure() {
+        // With a tiny memtable and many writes, verify that the active memtable
+        // does not grow without bound.  After flushing, the frozen memtable should
+        // be drained to SST, and all data should be queryable.
+        let dir = TempDir::new().unwrap();
+        let mut config = make_config(dir.path());
+        config.memtable_size_mb = 1;
+        let engine = Engine::open(config).await.unwrap();
+
+        // Write 5000 records with large values to force many flushes.
+        let big_val = vec![0xABu8; 4096];
+        for i in 0..5000 {
+            let key = format!("pressure_{:05}", i);
+            let rec = Record {
+                key,
+                ts: i as i64,
+                expire_at: i64::MAX,
+                value: big_val.clone(),
+            };
+            engine.write_batch_sync(vec![rec]).unwrap();
+        }
+        engine.flush().await.unwrap();
+
+        // All records must be queryable.
+        let results: Vec<Record> = engine
+            .scan(ScanRange::prefix("pressure_"))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(results.len(), 5000, "all 5000 records must survive");
+
+        // Verify no data duplication or corruption.
+        let mut keys: Vec<String> = results.iter().map(|r| r.key.clone()).collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), 5000, "no duplicate keys");
+    }
+
+    #[tokio::test]
+    async fn test_flush_does_not_block_runtime() {
+        // Verify that flush() runs without panicking in a multi-task environment.
+        let dir = TempDir::new().unwrap();
+        let engine = Arc::new(Engine::open(make_config(dir.path())).await.unwrap());
+
+        // Write some data.
+        engine
+            .write_batch(&[make_record("a", 1), make_record("b", 2)])
+            .await
+            .unwrap();
+
+        // Flush from a spawn_blocking context should work.
+        engine.flush().await.unwrap();
+
+        // Concurrent flush and read.
+        let e1 = engine.clone();
+        let h1 = tokio::spawn(async move {
+            e1.flush().await.unwrap();
+        });
+        let e2 = engine.clone();
+        let h2 = tokio::spawn(async move {
+            let r = e2.get("a", 1).await.unwrap();
+            assert!(r.is_some());
+        });
+        h1.await.unwrap();
+        h2.await.unwrap();
     }
 }

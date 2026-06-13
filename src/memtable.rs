@@ -261,6 +261,7 @@ fn increment_prefix(key: &[u8]) -> Vec<u8> {
 pub(crate) struct MemTables {
     active: RwLock<MemTable>,
     frozen: RwLock<Vec<MemTable>>,
+    #[allow(dead_code)]
     max_frozen: usize,
     memtable_size_limit: usize,
 }
@@ -289,6 +290,7 @@ impl MemTables {
         active.bytes() >= self.memtable_size_limit
     }
 
+    #[allow(dead_code)]
     pub fn frozen_is_full(&self) -> bool {
         self.frozen.read().len() >= self.max_frozen
     }

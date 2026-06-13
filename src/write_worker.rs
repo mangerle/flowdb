@@ -49,7 +49,8 @@ impl WriteWorker {
     ) -> Result<()> {
         let bytes_written = mem_bytes;
 
-        self.wal.write_encoded(wal_buf)?;
+        let batch_max_seq = records.iter().map(|r| r.seq).max().unwrap_or(0);
+        self.wal.write_encoded(wal_buf, batch_max_seq)?;
 
         {
             let mut active = self.memtables.active_for_batch();
@@ -64,7 +65,7 @@ impl WriteWorker {
         self.stats.set_frozen_count(self.memtables.frozen_count());
         self.stats.records_written(num_records, bytes_written);
 
-        if self.memtables.should_flush() && !self.memtables.frozen_is_full() {
+        if self.memtables.should_flush() {
             self.do_flush()?;
         }
 
@@ -158,6 +159,7 @@ impl WriteWorker {
 
         {
             let _ = self.wal.truncate_before(last_seq);
+            let _ = self.wal.flush();
         }
 
         let elapsed = start.elapsed();
