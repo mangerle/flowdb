@@ -197,6 +197,16 @@ pub struct Config {
     /// losing the most recent writes on power failure.
     #[serde(default)]
     pub wal_sync_mode: SyncMode,
+    /// When true, the engine automatically spawns a background task that
+    /// periodically flushes the memtable, compacts SSTables, garbage-collects
+    /// expired data, and syncs the WAL (for `IntervalMs` mode). Set to false
+    /// in tests that want full control over when flush/compact/GC occur.
+    #[serde(default = "default_background")]
+    pub auto_background: bool,
+}
+
+fn default_background() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -218,6 +228,7 @@ impl Default for Config {
             compaction_threshold: 2,
             create_if_missing: true,
             wal_sync_mode: SyncMode::Always,
+            auto_background: true,
         }
     }
 }

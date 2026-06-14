@@ -25,6 +25,7 @@ pub struct Engine {
     manifest: Arc<parking_lot::Mutex<Manifest>>,
     cache: Arc<BlockCache>,
     readers: Arc<RwLock<HashMap<u32, Arc<SstReader>>>>,
+    _maintenance: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Engine {
@@ -233,6 +234,8 @@ impl Engine {
             .unwrap_or(0);
         let seq_counter = std::sync::atomic::AtomicU64::new((max_sst_id as u64 + 1) * 1_000_000);
 
+        let auto_bg = config.auto_background;
+
         let worker = Arc::new(parking_lot::Mutex::new(WriteWorker::new(
             config.clone(),
             wal,
@@ -242,7 +245,7 @@ impl Engine {
             stats.clone(),
         )));
 
-        Ok(Self {
+        let mut engine = Self {
             config,
             worker,
             seq_counter,
@@ -252,7 +255,15 @@ impl Engine {
             manifest,
             cache,
             readers,
-        })
+            _maintenance: None,
+        };
+
+        // Auto-start periodic flush, compaction, GC, and WAL sync.
+        if auto_bg {
+            engine._maintenance = engine.spawn_background_maintenance();
+        }
+
+        Ok(engine)
     }
 
     pub async fn write_batch(&self, batch: &[Record]) -> Result<()> {
@@ -700,6 +711,9 @@ impl Engine {
     }
 
     pub async fn shutdown(self) -> Result<()> {
+        if let Some(handle) = &self._maintenance {
+            handle.abort();
+        }
         let mut worker = self.worker.lock();
         worker.do_flush()?;
         worker.flush_wal()?;
@@ -1146,6 +1160,7 @@ mod tests {
             compaction_threshold: 2,
             create_if_missing: true,
             wal_sync_mode: SyncMode::IntervalMs(u64::MAX),
+            auto_background: false,
         }
     }
 

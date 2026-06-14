@@ -33,6 +33,7 @@ fn stress_config(dir: &Path) -> Config {
         compaction_threshold: 2,
         create_if_missing: true,
         wal_sync_mode: SyncMode::Always,
+        auto_background: false,
     }
 }
 
