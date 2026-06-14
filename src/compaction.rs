@@ -335,3 +335,65 @@ impl PartialOrd for HeapEntry {
         Some(self.cmp(other))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::Manifest;
+    use parking_lot::RwLock;
+    use tempfile::TempDir;
+
+    fn make_test_runner(dir: &std::path::Path, threshold: usize) -> CompactionRunner {
+        CompactionRunner::new(
+            dir.to_path_buf(),
+            100,
+            1,
+            10,
+            threshold,
+            Arc::new(parking_lot::Mutex::new(Manifest::open(dir).unwrap())),
+            Arc::new(RwLock::new(BlockMetaIndex::new(3600))),
+            Arc::new(BlockCache::new(1)),
+            Arc::new(StatsCounters::new()),
+        )
+    }
+
+    #[test]
+    fn test_should_compact_false_when_empty() {
+        let dir = TempDir::new().unwrap();
+        let runner = make_test_runner(dir.path(), 2);
+        assert!(!runner.should_compact());
+    }
+
+    #[test]
+    fn test_should_compact_false_below_threshold() {
+        let dir = TempDir::new().unwrap();
+        let runner = make_test_runner(dir.path(), 5);
+        assert!(!runner.should_compact());
+    }
+
+    #[test]
+    fn test_heap_entry_ordering() {
+        let a = InternalRecord {
+            seq: 1, op: Op::Put, key: b"a".to_vec(), ts: 100, expire_at: i64::MAX, value: vec![], range_end: None,
+        };
+        let b = InternalRecord {
+            seq: 2, op: Op::Put, key: b"b".to_vec(), ts: 200, expire_at: i64::MAX, value: vec![], range_end: None,
+        };
+        let e1 = HeapEntry { record: a.clone(), source: 0 };
+        let e2 = HeapEntry { record: b.clone(), source: 0 };
+        // (key, ts, seq desc) — a.key < b.key, so e1 < e2
+        assert!(e1 < e2);
+
+        // Same key same ts, higher seq should be "less" (min-heap pops it first)
+        let a2 = InternalRecord { seq: 3, ..a.clone() };
+        let e3 = HeapEntry { record: a2, source: 0 };
+        assert!(e3 < e1, "higher seq should pop first for same key+ts");
+    }
+
+    #[test]
+    fn test_run_returns_false_when_no_sst() {
+        let dir = TempDir::new().unwrap();
+        let runner = make_test_runner(dir.path(), 1);
+        assert!(!runner.run().unwrap());
+    }
+}

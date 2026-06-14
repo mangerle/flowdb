@@ -22,6 +22,13 @@ cargo run --release --example flowdb-vs-rocksdb
 ## Features
 
 - LSM-tree storage with WAL (write-ahead log) for crash recovery
+- **Per-record WAL checksums** — corruption detected on replay, bad records rejected
+- **Config validation** — invalid configs (e.g. `time_bucket_secs=0`) rejected at startup instead of crashing
+- **Frozen memtable backpressure** — writes stall when flush can't keep up, preventing unbounded memory growth
+- **HTTP batch & size limits** — max 10 000 records/batch, 4 KB keys, 64 KB values (matches UDP protocol)
+- **Graceful shutdown** — SIGTERM/SIGINT triggers flush + clean exit
+- **Bounded UDP rate limiter** — cap at 100 K entries with periodic idle cleanup
+- **SST reader eviction** — stale readers removed after GC/compaction
 - **Lazy scan iterator** (RocksDB-style `ScanIterator`) for bounded-memory range scans
 - **`get_latest(key)`** for retrieving the most recent record by key
 - Bloom filters for fast point query negative checks
@@ -50,10 +57,10 @@ cargo run --release --example flowdb-vs-rocksdb
 
 ```toml
 # Full server (default)
-flowdb = "0.1"
+flowdb = "0.2"
 
 # Embedded engine only (no HTTP/UDP/auth, smaller binary)
-flowdb = { version = "0.1", default-features = false }
+flowdb = { version = "0.2", default-features = false }
 ```
 
 ## Quick Start

@@ -1,0 +1,186 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200" role="img" aria-labelledby="title desc">
+  <title id="title">FlowDB 架构总览</title>
+  <desc id="desc">适合文章发布和卡片预览的 FlowDB 方形架构图，展示写入路径、核心存储层、读路径与后台任务。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fff7ef" />
+      <stop offset="55%" stop-color="#f7fbff" />
+      <stop offset="100%" stop-color="#eef5ff" />
+    </linearGradient>
+    <linearGradient id="hero" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ff8457" />
+      <stop offset="100%" stop-color="#ffb446" />
+    </linearGradient>
+    <linearGradient id="writeCard" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fff4e9" />
+      <stop offset="100%" stop-color="#ffe7d3" />
+    </linearGradient>
+    <linearGradient id="coreCard" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f5f4ff" />
+      <stop offset="100%" stop-color="#eceaff" />
+    </linearGradient>
+    <linearGradient id="readCard" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#eef7ff" />
+      <stop offset="100%" stop-color="#deefff" />
+    </linearGradient>
+    <linearGradient id="taskCard" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fff1f5" />
+      <stop offset="100%" stop-color="#ffe0ea" />
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#0f172a" flood-opacity="0.10" />
+    </filter>
+    <filter id="softShadow" x="-20%" y="-20%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#334155" flood-opacity="0.08" />
+    </filter>
+    <pattern id="grid" width="42" height="42" patternUnits="userSpaceOnUse">
+      <path d="M 42 0 L 0 0 0 42" fill="none" stroke="#dde8f2" stroke-width="1" opacity="0.55" />
+    </pattern>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="#607c96" />
+    </marker>
+    <style>
+      .title { font: 700 30px 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #102033; }
+      .lead { font: 500 15px 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #577089; }
+      .section { font: 700 19px 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #102033; }
+      .hint { font: 500 13px 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #60758a; }
+      .pill { font: 700 12px 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; letter-spacing: 1px; }
+      .node { font: 700 16px 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #102033; }
+      .desc { font: 500 13px 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #53697f; }
+      .mini { font: 600 12px 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #617489; }
+      .accent { font: 700 14px 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; fill: #102033; }
+      .arrowLine { fill: none; stroke: #607c96; stroke-width: 3; marker-end: url(#arrow); }
+      .arrowThin { fill: none; stroke: #7b93aa; stroke-width: 2.2; marker-end: url(#arrow); }
+      .dash { stroke: #d7e3ee; stroke-width: 1.5; stroke-dasharray: 6 8; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="1200" rx="32" ry="32" fill="url(#bg)" />
+  <rect x="0" y="0" width="1200" height="1200" rx="32" ry="32" fill="url(#grid)" opacity="0.30" />
+  <circle cx="1020" cy="130" r="150" fill="#ffd9b8" opacity="0.34" />
+  <circle cx="170" cy="1060" r="150" fill="#d9edff" opacity="0.42" />
+
+  <rect x="54" y="46" width="1092" height="168" rx="30" ry="30" fill="#ffffff" filter="url(#shadow)" />
+  <rect x="84" y="78" width="156" height="42" rx="21" ry="21" fill="url(#hero)" />
+  <text class="pill" x="162" y="105" text-anchor="middle" fill="#ffffff">FLOWDB</text>
+  <text class="lead" x="272" y="104">面向发布场景优化的可视化配图</text>
+  <text class="title" x="84" y="160">架构总览：FlowDB 为什么在时序场景下更快</text>
+  <text class="lead" x="84" y="191">写路径尽量顺序追加，读路径尽量少碰磁盘，后台整理尽量降低写放大。</text>
+
+  <rect x="760" y="74" width="334" height="94" rx="24" ry="24" fill="#fffaf6" filter="url(#softShadow)" />
+  <text class="accent" x="790" y="106">为什么它快</text>
+  <text class="mini" x="790" y="132">短写路径 + 强过滤链条 + 惰性扫描</text>
+  <text class="mini" x="790" y="154">+ LZ4 / Zstd 分场景压缩策略</text>
+
+  <rect x="60" y="250" width="340" height="838" rx="28" ry="28" fill="#ffffff" filter="url(#softShadow)" />
+  <rect x="88" y="278" width="126" height="30" rx="15" ry="15" fill="#fff1e8" />
+  <text class="pill" x="151" y="298" text-anchor="middle" fill="#ef8b5c">WRITE PATH</text>
+  <text class="section" x="88" y="344">写入路径</text>
+  <text class="hint" x="88" y="368">先编码，再顺序写 WAL，再更新活跃 MemTable</text>
+
+  <rect x="88" y="416" width="284" height="116" rx="24" ry="24" fill="url(#writeCard)" stroke="#f3ba91" stroke-width="2" />
+  <circle cx="134" cy="474" r="26" fill="#ffffff" stroke="#ef8b5c" stroke-width="3" />
+  <text class="node" x="134" y="482" text-anchor="middle">1</text>
+  <text class="node" x="182" y="458">客户端写入</text>
+  <text class="desc" x="182" y="484">批量请求进入 Engine，</text>
+  <text class="desc" x="182" y="506">先为记录分配连续 seq。</text>
+
+  <rect x="88" y="576" width="284" height="116" rx="24" ry="24" fill="url(#writeCard)" stroke="#f3ba91" stroke-width="2" />
+  <circle cx="134" cy="634" r="26" fill="#ffffff" stroke="#ef8b5c" stroke-width="3" />
+  <text class="node" x="134" y="642" text-anchor="middle">2</text>
+  <text class="node" x="182" y="618">锁外预编码</text>
+  <text class="desc" x="182" y="644">先拼装 WAL buffer，</text>
+  <text class="desc" x="182" y="666">把 CPU 工作放到锁外。</text>
+
+  <rect x="88" y="736" width="284" height="116" rx="24" ry="24" fill="url(#writeCard)" stroke="#f3ba91" stroke-width="2" />
+  <circle cx="134" cy="794" r="26" fill="#ffffff" stroke="#ef8b5c" stroke-width="3" />
+  <text class="node" x="134" y="802" text-anchor="middle">3</text>
+  <text class="node" x="182" y="778">WAL + 活跃内存表</text>
+  <text class="desc" x="182" y="804">顺序追加日志，再把记录 push</text>
+  <text class="desc" x="182" y="826">到 active memtable。</text>
+
+  <path class="arrowLine" d="M 230 532 L 230 576" />
+  <path class="arrowLine" d="M 230 692 L 230 736" />
+
+  <rect x="108" y="924" width="244" height="120" rx="22" ry="22" fill="#fff7f0" stroke="#f1cfb5" stroke-width="2" />
+  <text class="accent" x="134" y="962">性能关键点</text>
+  <text class="mini" x="134" y="991">批量 seq 分配</text>
+  <text class="mini" x="134" y="1014">BufWriter 缓冲 WAL</text>
+  <text class="mini" x="134" y="1037">日志态 MemTable</text>
+
+  <rect x="430" y="250" width="340" height="838" rx="28" ry="28" fill="#ffffff" filter="url(#softShadow)" />
+  <rect x="458" y="278" width="144" height="30" rx="15" ry="15" fill="#f1efff" />
+  <text class="pill" x="530" y="298" text-anchor="middle" fill="#7669ff">STORAGE CORE</text>
+  <text class="section" x="458" y="344">核心存储层</text>
+  <text class="hint" x="458" y="368">MemTable、SST、索引、缓存和 Manifest</text>
+  <text class="hint" x="458" y="390">共同构成 FlowDB 的存储内核</text>
+
+  <rect x="458" y="430" width="284" height="136" rx="24" ry="24" fill="url(#coreCard)" stroke="#c2bbff" stroke-width="2" />
+  <text class="node" x="488" y="470">MemTables</text>
+  <text class="desc" x="488" y="500">active: Vec + AHashMap</text>
+  <text class="desc" x="488" y="526">frozen: BTreeMap</text>
+  <text class="mini" x="488" y="554">最新数据优先留在内存，</text>
+  <text class="mini" x="488" y="575">热点查询命中路径最短。</text>
+
+  <rect x="458" y="610" width="284" height="136" rx="24" ry="24" fill="url(#coreCard)" stroke="#c2bbff" stroke-width="2" />
+  <text class="node" x="488" y="650">SSTable 层</text>
+  <text class="desc" x="488" y="680">flush: LZ4</text>
+  <text class="desc" x="488" y="706">compaction: Zstd</text>
+  <text class="mini" x="488" y="734">reader 使用 mmap 和 block offsets，</text>
+  <text class="mini" x="488" y="755">按块读取、按需解压。</text>
+
+  <rect x="458" y="790" width="284" height="136" rx="24" ry="24" fill="url(#coreCard)" stroke="#c2bbff" stroke-width="2" />
+  <text class="node" x="488" y="830">BlockMetaIndex + Cache</text>
+  <text class="desc" x="488" y="860">按 key 范围和 time bucket 双索引筛块。</text>
+  <text class="mini" x="488" y="888">Bloom 排除整张 SST，</text>
+  <text class="mini" x="488" y="909">分片 LRU 复用热点 block。</text>
+
+  <rect x="482" y="962" width="236" height="86" rx="24" ry="24" fill="#f7f6ff" stroke="#cbc4ff" stroke-width="2" />
+  <text class="node" x="600" y="998" text-anchor="middle">Manifest</text>
+  <text class="mini" x="600" y="1024" text-anchor="middle">记录活跃 SST、块信息和 flush 进度</text>
+
+  <path class="arrowLine" d="M 600 566 L 600 610" />
+  <path class="arrowLine" d="M 600 746 L 600 790" />
+  <path class="arrowThin" d="M 600 926 L 600 962" />
+
+  <rect x="800" y="250" width="340" height="838" rx="28" ry="28" fill="#ffffff" filter="url(#softShadow)" />
+  <rect x="828" y="278" width="118" height="30" rx="15" ry="15" fill="#eaf5ff" />
+  <text class="pill" x="887" y="298" text-anchor="middle" fill="#519cff">READ PATH</text>
+  <text class="section" x="828" y="344">读路径与后台任务</text>
+  <text class="hint" x="828" y="368">先命中内存，再筛索引，最后只读最少 block</text>
+
+  <rect x="828" y="416" width="284" height="116" rx="24" ry="24" fill="url(#readCard)" stroke="#b8dcff" stroke-width="2" />
+  <circle cx="874" cy="474" r="26" fill="#ffffff" stroke="#5aa6ff" stroke-width="3" />
+  <text class="node" x="874" y="482" text-anchor="middle">1</text>
+  <text class="node" x="922" y="458">先查内存</text>
+  <text class="desc" x="922" y="484">active / frozen memtable 先命中，</text>
+  <text class="desc" x="922" y="506">热点数据可直接返回。</text>
+
+  <rect x="828" y="576" width="284" height="116" rx="24" ry="24" fill="url(#readCard)" stroke="#b8dcff" stroke-width="2" />
+  <circle cx="874" cy="634" r="26" fill="#ffffff" stroke="#5aa6ff" stroke-width="3" />
+  <text class="node" x="874" y="642" text-anchor="middle">2</text>
+  <text class="node" x="922" y="618">索引 + Bloom 过滤</text>
+  <text class="desc" x="922" y="644">先缩小候选块，再排除整张 SST，</text>
+  <text class="desc" x="922" y="666">避免无意义磁盘读取。</text>
+
+  <rect x="828" y="736" width="284" height="116" rx="24" ry="24" fill="url(#readCard)" stroke="#b8dcff" stroke-width="2" />
+  <circle cx="874" cy="794" r="26" fill="#ffffff" stroke="#5aa6ff" stroke-width="3" />
+  <text class="node" x="874" y="802" text-anchor="middle">3</text>
+  <text class="node" x="922" y="778">ScanIterator 惰性扫描</text>
+  <text class="desc" x="922" y="804">按需归并、多源遍历，</text>
+  <text class="desc" x="922" y="826">不一次性物化大结果集。</text>
+
+  <path class="arrowLine" d="M 970 532 L 970 576" />
+  <path class="arrowLine" d="M 970 692 L 970 736" />
+
+  <line class="dash" x1="828" y1="904" x2="1112" y2="904" />
+  <rect x="848" y="930" width="244" height="118" rx="22" ry="22" fill="url(#taskCard)" stroke="#f3b8c7" stroke-width="2" />
+  <text class="accent" x="874" y="966">后台任务</text>
+  <text class="mini" x="874" y="994">Compaction：size-tiered 合并</text>
+  <text class="mini" x="874" y="1017">GC：整表清理已整体过期的 SST</text>
+  <text class="mini" x="874" y="1040">把读放大和存储占用继续压下去</text>
+
+  <path class="arrowThin" d="M 742 862 C 790 862, 804 956, 848 956" />
+  <path class="arrowThin" d="M 742 680 C 790 680, 800 634, 828 634" />
+  <path class="arrowThin" d="M 742 498 C 790 498, 800 474, 828 474" />
+</svg>

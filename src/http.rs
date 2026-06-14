@@ -18,6 +18,13 @@ use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+/// Maximum number of records per HTTP write batch.
+const MAX_BATCH_RECORDS: usize = 10_000;
+/// Maximum key length (must match UDP protocol's MAX_KEY_BYTES).
+const MAX_KEY_BYTES: usize = 4096;
+/// Maximum value length (must match UDP protocol's MAX_VAL_BYTES).
+const MAX_VAL_BYTES: usize = 64 * 1024;
+
 #[derive(Clone)]
 pub struct AppState {
     pub engine: Arc<Engine>,
@@ -152,6 +159,20 @@ pub async fn write_json(
         ));
     }
 
+    if req.records.len() > MAX_BATCH_RECORDS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ActionResponse {
+                ok: false,
+                message: format!(
+                    "batch too large: {} records (max {})",
+                    req.records.len(),
+                    MAX_BATCH_RECORDS
+                ),
+            }),
+        ));
+    }
+
     let records: Vec<Record> = req
         .records
         .iter()
@@ -166,6 +187,35 @@ pub async fn write_json(
                 }),
             )
         })?;
+
+    for rec in &records {
+        if rec.key.len() > MAX_KEY_BYTES {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ActionResponse {
+                    ok: false,
+                    message: format!(
+                        "key too long: {} bytes (max {})",
+                        rec.key.len(),
+                        MAX_KEY_BYTES
+                    ),
+                }),
+            ));
+        }
+        if rec.value.len() > MAX_VAL_BYTES {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ActionResponse {
+                    ok: false,
+                    message: format!(
+                        "value too long: {} bytes (max {})",
+                        rec.value.len(),
+                        MAX_VAL_BYTES
+                    ),
+                }),
+            ));
+        }
+    }
 
     let count = records.len();
     state.engine.write_batch(&records).await.map_err(|e| {

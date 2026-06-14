@@ -233,6 +233,68 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Validate all configuration fields and return an error if any value
+    /// is out of range or would cause runtime panics (e.g. division by
+    /// zero in the time-bucket index).  Called by `Engine::open`.
+    pub fn validate(&self) -> crate::error::Result<()> {
+        use crate::error::FlowError;
+
+        if self.memtable_size_mb == 0 {
+            return Err(FlowError::Config(
+                "memtable_size_mb must be >= 1 (0 causes a flush storm)".into(),
+            ));
+        }
+        if self.max_frozen_memtables == 0 {
+            return Err(FlowError::Config(
+                "max_frozen_memtables must be >= 1 (0 means unbounded growth)".into(),
+            ));
+        }
+        if self.block_size == 0 {
+            return Err(FlowError::Config("block_size must be >= 1".into()));
+        }
+        if self.time_bucket_secs == 0 {
+            return Err(FlowError::Config(
+                "time_bucket_secs must be >= 1 (0 causes division-by-zero panic)".into(),
+            ));
+        }
+        if self.zstd_level < -22 || self.zstd_level > 22 {
+            return Err(FlowError::Config(format!(
+                "zstd_level must be in [-22, 22], got {}",
+                self.zstd_level
+            )));
+        }
+        if self.bloom_bits_per_key == 0 {
+            return Err(FlowError::Config(
+                "bloom_bits_per_key must be >= 1 (0 produces a useless filter)".into(),
+            ));
+        }
+        if self.wal_segment_size_mb == 0 {
+            return Err(FlowError::Config(
+                "wal_segment_size_mb must be >= 1 (0 causes segment rollover on every write)".into(),
+            ));
+        }
+        if self.compaction_threshold == 0 {
+            return Err(FlowError::Config(
+                "compaction_threshold must be >= 1 (0 disables compaction entirely)".into(),
+            ));
+        }
+        if self.block_cache_capacity_mb == 0 {
+            return Err(FlowError::Config(
+                "block_cache_capacity_mb must be >= 1".into(),
+            ));
+        }
+        if let Some(ttl) = self.default_ttl_secs {
+            if ttl == 0 {
+                return Err(FlowError::Config(
+                    "default_ttl_secs must be > 0 if set (0 = instant expiry)".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum KeyFilter {
     Prefix(Vec<u8>),
@@ -638,5 +700,91 @@ mod tests {
             _ => panic!("expected range"),
         }
         assert_eq!(tr, Some((100, 200)));
+    }
+
+    // ------------------------------------------------------------------
+    // Config::validate regression tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_config_validate_ok() {
+        let mut cfg = Config::default();
+        cfg.data_dir = std::env::temp_dir().join("flowdb-validate-ok");
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_validate_time_bucket_zero() {
+        let mut cfg = Config::default();
+        cfg.time_bucket_secs = 0;
+        assert!(
+            cfg.validate().is_err(),
+            "time_bucket_secs=0 must be rejected (div-by-zero)"
+        );
+    }
+
+    #[test]
+    fn test_config_validate_memtable_zero() {
+        let mut cfg = Config::default();
+        cfg.memtable_size_mb = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_max_frozen_zero() {
+        let mut cfg = Config::default();
+        cfg.max_frozen_memtables = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_block_size_zero() {
+        let mut cfg = Config::default();
+        cfg.block_size = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_zstd_out_of_range() {
+        let mut cfg = Config::default();
+        cfg.zstd_level = 100;
+        assert!(cfg.validate().is_err());
+        cfg.zstd_level = -25;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_bloom_zero() {
+        let mut cfg = Config::default();
+        cfg.bloom_bits_per_key = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_wal_segment_zero() {
+        let mut cfg = Config::default();
+        cfg.wal_segment_size_mb = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_compaction_threshold_zero() {
+        let mut cfg = Config::default();
+        cfg.compaction_threshold = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_cache_zero() {
+        let mut cfg = Config::default();
+        cfg.block_cache_capacity_mb = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_ttl_zero() {
+        let mut cfg = Config::default();
+        cfg.default_ttl_secs = Some(0);
+        assert!(cfg.validate().is_err());
     }
 }

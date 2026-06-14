@@ -1,6 +1,6 @@
 [package]
 name = "flowdb"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2024"
 authors = ["jinti<shenjindi@fourz.cn>"]
 repository = "https://github.com/restsend/flowdb"
@@ -53,6 +53,9 @@ tower = { version = "0.5", features = ["util"] }
 criterion = "0.8.2"
 arbitrary = { version = "1", features = ["derive"] }
 rocksdb = "0.24"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)', 'cfg(coverage_nightly)'] }
 
 [[bench]]
 name = "flowdb_bench"

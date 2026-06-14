@@ -1,3 +1,7 @@
+// Enable the unstable `coverage_attribute` feature only when running
+// cargo-llvm-cov on nightly, so we can exclude the untestable `main()`.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 use flowdb::{Config, Engine, Query, Record, SyncMode};
 use std::path::Path;
 use std::sync::Arc;
@@ -5,7 +9,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 fn make_temp_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("flowdb-stress-{}", std::process::id()));
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "flowdb-stress-{}-{}",
+        std::process::id(),
+        id
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -246,6 +257,7 @@ async fn bench_mixed_rw(
     elapsed
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[tokio::main]
 async fn main() {
     let dir = make_temp_dir();
@@ -443,4 +455,182 @@ async fn main() {
     cleanup_temp_dir(&dir);
     println!();
     println!("Done.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_format_duration_micros() {
+        assert_eq!(format_duration(Duration::from_micros(500)), "500µs");
+    }
+
+    #[test]
+    fn test_format_duration_millis() {
+        assert_eq!(
+            format_duration(Duration::from_micros(1_500)),
+            "1.5ms"
+        );
+    }
+
+    #[test]
+    fn test_format_duration_secs() {
+        assert_eq!(
+            format_duration(Duration::from_micros(3_500_000)),
+            "3.50s"
+        );
+    }
+
+    #[test]
+    fn test_stress_config_values() {
+        let dir = make_temp_dir();
+        let cfg = stress_config(&dir);
+        assert_eq!(cfg.memtable_size_mb, 4);
+        assert_eq!(cfg.block_size, 4096);
+        assert_eq!(cfg.max_frozen_memtables, 4);
+        assert_eq!(cfg.create_if_missing, true);
+        assert_eq!(cfg.wal_sync_mode, SyncMode::Always);
+        assert!(!cfg.auto_background);
+        cleanup_temp_dir(&dir);
+    }
+
+    #[test]
+    fn test_format_bytes_under_kb() {
+        assert_eq!(format_bytes(0), "0B");
+        assert_eq!(format_bytes(512), "512B");
+        assert_eq!(format_bytes(1023), "1023B");
+    }
+
+    #[test]
+    fn test_format_bytes_kb_range() {
+        assert_eq!(format_bytes(1024), "1.0KB");
+        assert_eq!(format_bytes(2048), "2.0KB");
+        assert_eq!(format_bytes(2560), "2.5KB");
+    }
+
+    #[test]
+    fn test_format_bytes_mb_range() {
+        assert_eq!(format_bytes(1024 * 1024), "1.0MB");
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1024.0MB");
+    }
+
+    #[test]
+    fn test_print_header_writes_label() {
+        // Smoke test — just make sure it does not panic.
+        print_header("test header");
+    }
+
+    #[test]
+    fn test_print_result_basic() {
+        let d = Duration::from_micros(1_000);
+        print_result("basic", 100, d, None);
+        print_result("with-extra", 100, d, Some("extra info"));
+    }
+
+    #[test]
+    fn test_print_result_avg_ns() {
+        // 100 ns / op -> "<X>ns" formatting branch.
+        let d = Duration::from_nanos(500);
+        print_result("fast", 5, d, None);
+    }
+
+    #[test]
+    fn test_print_result_avg_ms() {
+        // 5 ms / op -> ms branch in avg formatting.
+        let d = Duration::from_millis(50);
+        print_result("slow", 10, d, None);
+    }
+
+    #[tokio::test]
+    async fn test_bench_sequential_writes_runs() {
+        let dir = make_temp_dir();
+        let cfg = stress_config(&dir);
+        let engine = Engine::open(cfg).await.unwrap();
+        let d = bench_sequential_writes(&engine, 5, 2, 8).await;
+        assert!(d.as_nanos() > 0);
+        engine.shutdown().await.unwrap();
+        cleanup_temp_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_bench_concurrent_writes_runs() {
+        let dir = make_temp_dir();
+        let cfg = stress_config(&dir);
+        let engine = Arc::new(Engine::open(cfg).await.unwrap());
+        let d = bench_concurrent_writes(engine.clone(), 50, 2, 5, 8).await;
+        assert!(d.as_nanos() > 0);
+        let _ = engine.flush().await;
+        cleanup_temp_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_bench_concurrent_reads_runs() {
+        let dir = make_temp_dir();
+        let cfg = stress_config(&dir);
+        let engine = Arc::new(Engine::open(cfg).await.unwrap());
+        engine
+            .write_batch(&[Record {
+                key: b"prefix_a".to_vec(),
+                ts: 1,
+                expire_at: i64::MAX,
+                value: vec![1],
+            }])
+            .await
+            .unwrap();
+        let prefixes = vec!["prefix_a".to_string()];
+        let d = bench_concurrent_reads(engine.clone(), &prefixes, 2, 3).await;
+        assert!(d.as_nanos() > 0);
+        let _ = engine.flush().await;
+        cleanup_temp_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_bench_mixed_rw_runs() {
+        let dir = make_temp_dir();
+        let cfg = stress_config(&dir);
+        let engine = Arc::new(Engine::open(cfg).await.unwrap());
+        let d = bench_mixed_rw(engine.clone(), 40, 0.5, 2, 16).await;
+        assert!(d.as_nanos() > 0);
+        let _ = engine.flush().await;
+        cleanup_temp_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_bench_mixed_rw_all_reads() {
+        // write_ratio = 0.0 → all reads (exercises the else branch entirely).
+        let dir = make_temp_dir();
+        let cfg = stress_config(&dir);
+        let engine = Arc::new(Engine::open(cfg).await.unwrap());
+        let d = bench_mixed_rw(engine.clone(), 20, 0.0, 2, 8).await;
+        assert!(d.as_nanos() > 0);
+        let _ = engine.flush().await;
+        cleanup_temp_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_bench_sequential_writes_smaller_than_batch() {
+        // n < batch_size → exercises the inner break path.
+        let dir = make_temp_dir();
+        let cfg = stress_config(&dir);
+        let engine = Engine::open(cfg).await.unwrap();
+        let d = bench_sequential_writes(&engine, 3, 100, 4).await;
+        assert!(d.as_nanos() > 0);
+        engine.shutdown().await.unwrap();
+        cleanup_temp_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_bench_concurrent_writes_over_subscription() {
+        // concurrency * batch_size > total_records → exercises the
+        // fetch_sub rollback when batch_start exceeds total.
+        let dir = make_temp_dir();
+        let cfg = stress_config(&dir);
+        let engine = Arc::new(Engine::open(cfg).await.unwrap());
+        let d = bench_concurrent_writes(engine.clone(), 5, 8, 50, 8).await;
+        assert!(d.as_nanos() > 0);
+        let _ = engine.flush().await;
+        cleanup_temp_dir(&dir);
+    }
 }

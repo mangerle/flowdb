@@ -48,6 +48,13 @@ impl WriteWorker {
         num_records: u64,
         sync_mode: SyncMode,
     ) -> Result<()> {
+        // Backpressure: if frozen memtables have piled up beyond the limit,
+        // flush them before accepting new writes. This prevents unbounded
+        // memory growth when the flush rate can't keep up with writes.
+        while self.memtables.frozen_backpressure() {
+            self.do_flush()?;
+        }
+
         let bytes_written = mem_bytes;
 
         let batch_max_seq = records.iter().map(|r| r.seq).max().unwrap_or(0);
@@ -172,8 +179,12 @@ impl WriteWorker {
         }
 
         {
-            let _ = self.wal.truncate_before(last_seq);
-            let _ = self.wal.sync_all();
+            if let Err(e) = self.wal.truncate_before(last_seq) {
+                tracing::warn!("WAL truncate_before({}) failed: {}", last_seq, e);
+            }
+            if let Err(e) = self.wal.sync_all() {
+                tracing::warn!("WAL sync_all after flush failed: {}", e);
+            }
         }
 
         let elapsed = start.elapsed();

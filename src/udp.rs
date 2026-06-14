@@ -16,6 +16,8 @@ const TTL_NONE: u32 = 0;
 /// Hard cap on key/value lengths to prevent pathological allocations.
 const MAX_KEY_BYTES: usize = 4096;
 const MAX_VAL_BYTES: usize = 64 * 1024;
+/// Maximum number of records allowed in a single UDP/HTTP-binary frame.
+const MAX_FRAME_RECORDS: usize = 1024;
 
 /// 8-byte SipHash-based authentication tag for V2 frames.
 const AUTH_HASH_BYTES: usize = 8;
@@ -139,7 +141,13 @@ pub fn decode_frame(data: &[u8], api_key: Option<&str>) -> Result<Vec<Record>> {
     }
     let version = data[1];
     let (raw_count, mut pos) = read_u16(data, 2).unwrap();
-    let count = (raw_count as usize).min(1024);
+    let count = raw_count as usize;
+    if count > MAX_FRAME_RECORDS {
+        return Err(FlowError::Other(format!(
+            "frame record count too large: {} (max {})",
+            count, MAX_FRAME_RECORDS
+        )));
+    }
 
     match (version, api_key) {
         (VERSION_V1, None) => {
@@ -247,6 +255,11 @@ struct TokenBucket {
     rate: f64,
 }
 
+/// Maximum number of per-IP rate-limit entries before proactive eviction
+/// kicks in.  Prevents unbounded HashMap growth from spoofed-source-IP
+/// DoS attacks.
+const MAX_RATE_LIMIT_ENTRIES: usize = 100_000;
+
 impl TokenBucket {
     fn new(rate_per_sec: u32) -> Self {
         Self {
@@ -280,6 +293,7 @@ pub async fn start_udp_listener(
     let socket = UdpSocket::bind(addr).await?;
     let mut buf = vec![0u8; max_packet_size];
     let mut rate_limits: HashMap<IpAddr, TokenBucket> = HashMap::new();
+    let mut last_cleanup = std::time::Instant::now();
 
     loop {
         match socket.recv_from(&mut buf).await {
@@ -289,6 +303,18 @@ pub async fn start_udp_listener(
                 // Per-IP rate limiting
                 if rate_limit_per_ip > 0 {
                     let ip = src.ip();
+
+                    // Bound the HashMap to prevent unbounded growth.
+                    // Every 30 seconds, or when the cap is exceeded, drop
+                    // buckets that have been idle (no recent traffic).
+                    if now.duration_since(last_cleanup).as_secs() >= 30
+                        || rate_limits.len() > MAX_RATE_LIMIT_ENTRIES
+                    {
+                        let cutoff = now - std::time::Duration::from_secs(60);
+                        rate_limits.retain(|_, b| b.last_refill >= cutoff);
+                        last_cleanup = now;
+                    }
+
                     let bucket = rate_limits
                         .entry(ip)
                         .or_insert_with(|| TokenBucket::new(rate_limit_per_ip));

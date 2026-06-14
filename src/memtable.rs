@@ -47,9 +47,13 @@ impl MemTable {
         // Range over all seq numbers for this (key, ts). Returns the
         // highest-seq record (last in BTreeMap order since seq is the
         // tuple's 3rd element and sorts ascending).
+        //
+        // CORRECTNESS: We use `.next_back()` to get the LAST entry in the
+        // range (highest seq). Using `.next()` would return the FIRST entry
+        // (lowest seq), causing stale reads after delete/patch operations.
         let start = (key.to_vec(), ts, u64::MIN);
         let end = (key.to_vec(), ts, u64::MAX);
-        self.map.range(start..=end).next().map(|(_, v)| v)
+        self.map.range(start..=end).next_back().map(|(_, v)| v)
     }
 
     pub fn query_prefix(&self, key: &[u8], now_us: i64) -> Vec<&InternalRecord> {
@@ -199,6 +203,13 @@ impl MemTables {
 
     #[allow(dead_code)]
     pub fn frozen_is_full(&self) -> bool {
+        self.frozen.read().len() >= self.max_frozen
+    }
+
+    /// Returns true when frozen tables have piled up past `max_frozen`,
+    /// indicating that flush can't keep up with writes.  The write path
+    /// should apply backpressure (block or error) in this case.
+    pub fn frozen_backpressure(&self) -> bool {
         self.frozen.read().len() >= self.max_frozen
     }
 
@@ -621,5 +632,103 @@ mod tests {
         mts.insert(make_rec("b", 200, 2));
         mts.freeze();
         assert!(mts.frozen_is_full());
+    }
+
+    // ------------------------------------------------------------------
+    // Regression tests for MemTable::get multi-version resolution bug.
+    //
+    // BUG HISTORY: MemTable::get used `.next()` (lowest seq) instead of
+    // `.next_back()` (highest seq).  This caused stale reads after delete
+    // or patch operations on the same (key, ts).  The original test
+    // `test_memtable_get` only tested with a single version per (key, ts)
+    // — exactly the happy path that didn't exercise the bug.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_memtable_get_returns_highest_seq_for_same_key_ts() {
+        let mut mt = MemTable::new();
+        // Two versions of ("a", 100) with different values.
+        let mut rec1 = make_rec("a", 100, 1);
+        rec1.value = b"old".to_vec();
+        let mut rec2 = make_rec("a", 100, 2);
+        rec2.value = b"new".to_vec();
+        mt.insert(rec1);
+        mt.insert(rec2);
+
+        let result = mt.get(b"a", 100).expect("should find a record");
+        assert_eq!(
+            result.seq, 2,
+            "get must return highest-seq version (seq=2), not lowest (seq=1)"
+        );
+        assert_eq!(result.value, b"new");
+    }
+
+    #[test]
+    fn test_memtable_get_after_delete_returns_tombstone() {
+        let mut mt = MemTable::new();
+        // Put at seq=1, Delete at seq=2 for same (key, ts).
+        mt.insert(make_rec("a", 100, 1));
+        let delete = InternalRecord::delete(b"a".to_vec(), 100, 2);
+        mt.insert(delete);
+
+        let result = mt.get(b"a", 100).expect("should find the tombstone");
+        assert_eq!(result.seq, 2, "must return the delete tombstone (highest seq)");
+        assert!(
+            result.op != crate::record::Op::Put,
+            "delete tombstone must win over older Put"
+        );
+    }
+
+    #[test]
+    fn test_memtable_get_three_versions() {
+        let mut mt = MemTable::new();
+        let mut rec1 = make_rec("k", 50, 10);
+        rec1.value = b"v1".to_vec();
+        let mut rec2 = make_rec("k", 50, 20);
+        rec2.value = b"v2".to_vec();
+        let mut rec3 = make_rec("k", 50, 30);
+        rec3.value = b"v3".to_vec();
+        mt.insert(rec1);
+        mt.insert(rec2);
+        mt.insert(rec3);
+
+        let result = mt.get(b"k", 50).unwrap();
+        assert_eq!(result.seq, 30);
+        assert_eq!(result.value, b"v3");
+    }
+
+    #[test]
+    fn test_memtables_get_multi_version_across_active_and_frozen() {
+        // Put in frozen table (seq=1), then a newer Put in active (seq=2).
+        // MemTables::get should prefer active (higher seq).
+        let mts = MemTables::new(2, 1024);
+        let mut rec1 = make_rec("x", 100, 1);
+        rec1.value = b"frozen_val".to_vec();
+        mts.insert(rec1);
+        mts.freeze();
+
+        let mut rec2 = make_rec("x", 100, 2);
+        rec2.value = b"active_val".to_vec();
+        mts.insert(rec2);
+
+        let result = mts.get(b"x", 100, i64::MAX).unwrap();
+        assert_eq!(result.value, b"active_val");
+        assert_eq!(result.seq, 2);
+    }
+
+    #[test]
+    fn test_memtables_get_delete_in_active_overrides_put_in_frozen() {
+        // Put in frozen table, Delete in active → must see deleted.
+        let mts = MemTables::new(2, 1024);
+        mts.insert(make_rec("d", 200, 1));
+        mts.freeze();
+        let delete = InternalRecord::delete(b"d".to_vec(), 200, 2);
+        mts.insert(delete);
+
+        let result = mts.get(b"d", 200, i64::MAX);
+        assert!(
+            result.is_none() || result.unwrap().op != crate::record::Op::Put,
+            "delete in active must override put in frozen"
+        );
     }
 }

@@ -113,6 +113,7 @@ impl Engine {
     }
 
     pub async fn open(config: Config) -> Result<Self> {
+        config.validate()?;
         let data_dir = &config.data_dir;
         if !data_dir.exists() && !config.create_if_missing {
             return Err(std::io::Error::new(
@@ -453,7 +454,14 @@ impl Engine {
     ) -> Option<Record> {
         let reader = match Engine::get_reader(&self.readers, &self.config, sst_id) {
             Ok(r) => r,
-            Err(_) => return None,
+            Err(e) => {
+                tracing::error!(
+                    "SST point lookup: cannot open reader for sst {}: {}",
+                    sst_id,
+                    e
+                );
+                return None;
+            }
         };
 
         if let Some(cached) = reader.read_block_cached(block_idx, &self.cache) {
@@ -466,7 +474,15 @@ impl Engine {
                 self.cache.insert(CacheKey { sst_id, block_idx }, records);
                 result
             }
-            Err(_) => None,
+            Err(e) => {
+                tracing::error!(
+                    "SST point lookup: block decompress failed sst={} block={}: {}",
+                    sst_id,
+                    block_idx,
+                    e
+                );
+                None
+            }
         }
     }
 
@@ -688,9 +704,11 @@ impl Engine {
             self.cache.clone(),
             self.stats.clone(),
         );
-        tokio::task::spawn_blocking(move || gc.run())
+        let purged = tokio::task::spawn_blocking(move || gc.run())
             .await
-            .map_err(|_| FlowError::Closed)?
+            .map_err(|_| FlowError::Closed)??;
+        self.evict_stale_readers();
+        Ok(purged)
     }
 
     pub async fn trigger_compaction(&self) -> Result<bool> {
@@ -705,11 +723,15 @@ impl Engine {
             self.cache.clone(),
             self.stats.clone(),
         );
-        tokio::task::spawn_blocking(move || compaction.run())
+        let did = tokio::task::spawn_blocking(move || compaction.run())
             .await
-            .map_err(|_| FlowError::Closed)?
+            .map_err(|_| FlowError::Closed)??;
+        self.evict_stale_readers();
+        Ok(did)
     }
 
+    /// Shut down the engine, flushing the memtable and WAL.  Consumes
+    /// `self` — use [`Engine::close`] if the engine is behind an `Arc`.
     pub async fn shutdown(self) -> Result<()> {
         if let Some(handle) = &self._maintenance {
             handle.abort();
@@ -718,6 +740,36 @@ impl Engine {
         worker.do_flush()?;
         worker.flush_wal()?;
         Ok(())
+    }
+
+    /// Flush the memtable and WAL without consuming `self`.
+    ///
+    /// This is the `Arc<Engine>`-friendly alternative to `shutdown`.  Use
+    /// it from server binaries that share the engine across tasks/handlers.
+    /// The background maintenance task (if any) is NOT stopped — call
+    /// `abort()` on the handle returned by `spawn_background_maintenance`
+    /// first, or simply drop the `JoinHandle`.
+    pub async fn close(&self) -> Result<()> {
+        let worker = self.worker.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut w = worker.lock();
+            w.do_flush()?;
+            w.flush_wal()
+        })
+        .await
+        .map_err(|e| FlowError::Other(format!("close join error: {e}")))?
+    }
+
+    /// Remove reader cache entries for SSTs that are no longer in the
+    /// manifest (i.e. deleted by GC or superseded by compaction).  This
+    /// prevents file-descriptor / mmap leaks over long-running operations.
+    fn evict_stale_readers(&self) {
+        let active_ssts: std::collections::HashSet<u32> = {
+            let mf = self.manifest.lock();
+            mf.state().sstables.keys().copied().collect()
+        };
+        let mut readers = self.readers.write();
+        readers.retain(|sst_id, _| active_ssts.contains(sst_id));
     }
 
     // New iterator-based scan API (RocksDB-style)
@@ -893,11 +945,26 @@ impl ScanIterator {
                 let reader =
                     match Engine::get_reader_from_map(&readers_snapshot, config, meta.sst_id) {
                         Ok(r) => r,
-                        Err(_) => continue,
+                        Err(e) => {
+                            tracing::error!(
+                                "Scan: cannot open SST reader for sst {}: {}",
+                                meta.sst_id,
+                                e
+                            );
+                            continue;
+                        }
                     };
                 let records = match reader.read_block_decompress(meta.block_idx) {
                     Ok((_, recs)) => recs,
-                    Err(_) => continue,
+                    Err(e) => {
+                        tracing::error!(
+                            "Scan: block decompress failed sst={} block={}: {}",
+                            meta.sst_id,
+                            meta.block_idx,
+                            e
+                        );
+                        continue;
+                    }
                 };
                 for rec in records {
                     if rec.expire_at <= now_us {
@@ -923,11 +990,26 @@ impl ScanIterator {
                 let reader =
                     match Engine::get_reader_from_map(&readers_snapshot, config, meta.sst_id) {
                         Ok(r) => r,
-                        Err(_) => continue,
+                        Err(e) => {
+                            tracing::error!(
+                                "Scan: cannot open SST reader for sst {}: {}",
+                                meta.sst_id,
+                                e
+                            );
+                            continue;
+                        }
                     };
                 let records = match reader.read_block_arc(meta.block_idx, cache) {
                     Ok(arc) => arc,
-                    Err(_) => continue,
+                    Err(e) => {
+                        tracing::error!(
+                            "Scan: read_block_arc failed sst={} block={}: {}",
+                            meta.sst_id,
+                            meta.block_idx,
+                            e
+                        );
+                        continue;
+                    }
                 };
                 let filtered = filter_sst_block(
                     &records,
@@ -2145,5 +2227,541 @@ mod tests {
             }
             engine.shutdown().await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn test_write_batch_empty() {
+        let dir = TempDir::new().unwrap();
+        let config = make_config(dir.path());
+        let engine = Engine::open(config).await.unwrap();
+        assert!(engine.write_batch(&[]).await.is_ok());
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_batch_empty() {
+        let dir = TempDir::new().unwrap();
+        let config = make_config(dir.path());
+        let engine = Engine::open(config).await.unwrap();
+        assert!(engine.delete_batch(&[]).await.is_ok());
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent_key() {
+        let dir = TempDir::new().unwrap();
+        let config = make_config(dir.path());
+        let engine = Engine::open(config).await.unwrap();
+        let result = engine.get("no_such_key", 0).await.unwrap();
+        assert!(result.is_none());
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_patch_nonexistent_record_error() {
+        let dir = TempDir::new().unwrap();
+        let config = make_config(dir.path());
+        let engine = Engine::open(config).await.unwrap();
+        let result = engine.patch_record("no_such_key", 0, Some(vec![1, 2, 3]), None).await;
+        assert!(result.is_err());
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_range_empty_strings() {
+        let dir = TempDir::new().unwrap();
+        let config = make_config(dir.path());
+        let engine = Engine::open(config).await.unwrap();
+        // Empty start and end strings — should not panic, produce a valid delete
+        // range tombstone.
+        assert!(engine.delete_range("", "z").await.is_ok());
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_query_by_prefix_empty_string() {
+        let dir = TempDir::new().unwrap();
+        let config = make_config(dir.path());
+        let engine = Engine::open(config).await.unwrap();
+        // Empty prefix matches everything.
+        let results = engine.query_by_prefix("").await.unwrap();
+        assert!(results.is_empty());
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_latest_nonexistent() {
+        let dir = TempDir::new().unwrap();
+        let config = make_config(dir.path());
+        let engine = Engine::open(config).await.unwrap();
+        assert!(engine.get_latest("no_such_key").unwrap().is_none());
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_flush_on_empty_engine() {
+        let dir = TempDir::new().unwrap();
+        let config = make_config(dir.path());
+        let engine = Engine::open(config).await.unwrap();
+        // Flushing an empty engine should succeed (no-op).
+        assert!(engine.flush().await.is_ok());
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_all_range() {
+        let dir = TempDir::new().unwrap();
+        let config = make_config(dir.path());
+        let engine = Engine::open(config).await.unwrap();
+        let iter = engine.scan(ScanRange::all()).unwrap();
+        let results: Vec<_> = iter.map(|r| r.unwrap()).collect();
+        assert!(results.is_empty());
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_config_create_if_missing_false() {
+        let dir = TempDir::new().unwrap();
+        let nonexistent = dir.path().join("nonexistent");
+        let mut cfg = make_config(dir.path());
+        cfg.data_dir = nonexistent.clone();
+        cfg.create_if_missing = false;
+        let result = Engine::open(cfg).await;
+        assert!(result.is_err(), "should fail when dir does not exist and create_if_missing is false");
+    }
+
+    #[tokio::test]
+    async fn test_query_empty_result() {
+        let dir = TempDir::new().unwrap();
+        let config = make_config(dir.path());
+        let engine = Engine::open(config).await.unwrap();
+        let results = engine.query_by_key_range("z", "zzz").await.unwrap();
+        assert!(results.is_empty());
+        engine.shutdown().await.unwrap();
+    }
+
+    /// Exercise the `auto_background = true` startup path which spawns the
+    /// maintenance task (and thus the body of `spawn_background_maintenance`).
+    #[tokio::test]
+    async fn test_engine_auto_background_starts_maintenance() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = make_config(dir.path());
+        cfg.auto_background = true;
+        // Short flush interval so the WAL/flush tick fires quickly.
+        cfg.flush_interval_ms = 10;
+        cfg.gc_interval_secs = 1;
+        cfg.wal_sync_mode = SyncMode::IntervalMs(10);
+        let engine = Engine::open(cfg).await.unwrap();
+        // Write a record so the flush tick has something to do.
+        engine
+            .write_batch(&[make_record("bg", 1)])
+            .await
+            .unwrap();
+        // Yield to let the maintenance task tick at least once.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `spawn_background_maintenance` should be explicitly callable and
+    /// return a handle that can be aborted.
+    #[tokio::test]
+    async fn test_spawn_background_maintenance_explicit() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = make_config(dir.path());
+        cfg.flush_interval_ms = 10;
+        cfg.gc_interval_secs = 1;
+        cfg.wal_sync_mode = SyncMode::IntervalMs(10);
+        let engine = Engine::open(cfg).await.unwrap();
+        let handle = engine
+            .spawn_background_maintenance()
+            .expect("handle should be Some");
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        handle.abort();
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `write_batch_owned` is the consuming variant of write_batch.
+    #[tokio::test]
+    async fn test_write_batch_owned() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        let records = vec![make_record("owned1", 1), make_record("owned2", 2)];
+        engine.write_batch_owned(records).await.unwrap();
+        let r = engine.get("owned1", 1).await.unwrap();
+        assert!(r.is_some());
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `write_batch_sync` is the synchronous write path.
+    #[tokio::test]
+    async fn test_write_batch_sync() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        engine
+            .write_batch_sync(vec![make_record("sync1", 1), make_record("sync2", 2)])
+            .unwrap();
+        let r = engine.get("sync1", 1).await.unwrap();
+        assert!(r.is_some());
+        // Empty batch should be a no-op.
+        engine.write_batch_sync(vec![]).unwrap();
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `write_batch_owned` with an empty batch must be a no-op.
+    #[tokio::test]
+    async fn test_write_batch_owned_empty() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        engine.write_batch_owned(vec![]).await.unwrap();
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `write_batch_ttl` exercises the TTL conversion path. Uses a very
+    /// large TTL so the resulting expire_at is in the future.
+    #[tokio::test]
+    async fn test_write_batch_ttl_path() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        engine
+            .write_batch_ttl(&[make_record("ttl1", 1)], Some(u32::MAX as u64))
+            .await
+            .unwrap();
+        let r = engine.get("ttl1", 1).await.unwrap().unwrap();
+        assert!(r.expire_at < i64::MAX);
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `write_batch_owned_ttl` exercises the owned+ttl path.
+    #[tokio::test]
+    async fn test_write_batch_owned_ttl_path() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        engine
+            .write_batch_owned_ttl(vec![make_record("ot", 1)], Some(u32::MAX as u64))
+            .await
+            .unwrap();
+        let r = engine.get("ot", 1).await.unwrap().unwrap();
+        assert!(r.expire_at < i64::MAX);
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `get` / `get_sync` against a missing key returns None.
+    #[tokio::test]
+    async fn test_get_missing_key() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        assert!(engine.get("missing", 1).await.unwrap().is_none());
+        assert!(engine.get_sync("missing", 1).is_none());
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `get_latest_async` returns the highest-ts version of a key.
+    #[tokio::test]
+    async fn test_get_latest_async_path() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        engine
+            .write_batch(&[make_record("gl", 1), make_record("gl", 5), make_record("gl", 3)])
+            .await
+            .unwrap();
+        let latest = engine.get_latest_async("gl").await.unwrap().unwrap();
+        assert_eq!(latest.ts, 5);
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `get_latest` on a non-existent key returns None.
+    #[tokio::test]
+    async fn test_get_latest_missing() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        assert!(engine.get_latest("no-such-key").unwrap().is_none());
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `delete_batch` with an empty input is a no-op (named to avoid clash).
+    #[tokio::test]
+    async fn test_delete_batch_empty_noop() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        engine.delete_batch(&[]).await.unwrap();
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `patch_record` on a missing record returns an error.
+    #[tokio::test]
+    async fn test_patch_missing_record() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        let err = engine
+            .patch_record("ghost", 1, Some(b"v".to_vec()), None)
+            .await;
+        assert!(err.is_err());
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `patch_record` updating both value and ttl.
+    #[tokio::test]
+    async fn test_patch_value_and_ttl() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        engine
+            .write_batch(&[make_record("p", 1)])
+            .await
+            .unwrap();
+        let patched = engine
+            .patch_record("p", 1, Some(b"new".to_vec()), Some(u32::MAX as u64))
+            .await
+            .unwrap();
+        assert_eq!(patched.value, b"new");
+        assert!(patched.expire_at < i64::MAX);
+        engine.shutdown().await.unwrap();
+    }
+
+    /// Convenience wrappers (`query_by_prefix`, `query_time_range`,
+    /// `query_prefix_time_range`, `query_key_time_range`) hit the underlying
+    /// `query` method through their dedicated entry points.
+    #[tokio::test]
+    async fn test_query_convenience_wrappers() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        engine
+            .write_batch(&[
+                make_record("k1", 10),
+                make_record("k1", 20),
+                make_record("k2", 30),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(engine.query_by_prefix("k1").await.unwrap().len(), 2);
+        assert_eq!(engine.query_time_range(0, 100).await.unwrap().len(), 3);
+        assert_eq!(
+            engine.query_prefix_time_range("k1", 0, 100).await.unwrap().len(),
+            2
+        );
+        assert_eq!(
+            engine.query_key_time_range("k1", "k2", 0, 100).await.unwrap().len(),
+            3
+        );
+        engine.shutdown().await.unwrap();
+    }
+
+    /// Scan convenience wrappers (`scan_prefix_time_range`) cover the
+    /// range-builder paths.
+    #[tokio::test]
+    async fn test_scan_convenience_wrappers() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        engine
+            .write_batch(&[make_record("c1", 1), make_record("c2", 2)])
+            .await
+            .unwrap();
+        let r: Vec<_> = engine
+            .scan_prefix_time_range("c", 0, 100)
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(r.len(), 2);
+        engine.shutdown().await.unwrap();
+    }
+
+    /// Reopening an engine with persisted SSTs walks the manifest recovery
+    /// path (active_sst_ids → index rebuild) — covers lines around 142.
+    #[tokio::test]
+    async fn test_engine_reopen_with_ssts() {
+        let dir = TempDir::new().unwrap();
+        {
+            let engine = Engine::open(make_config(dir.path())).await.unwrap();
+            engine
+                .write_batch(&[make_record("persisted", 1)])
+                .await
+                .unwrap();
+            engine.flush().await.unwrap();
+            engine.shutdown().await.unwrap();
+        }
+        // Reopen — manifest recovery + bloom-bits check should run.
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        let r = engine.get("persisted", 1).await.unwrap();
+        assert!(r.is_some(), "record should survive reopen");
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `get_sync` against a flushed SST hits the block reader path
+    /// (single_sst_point + block_search).
+    #[tokio::test]
+    async fn test_get_sync_after_flush() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        engine
+            .write_batch(&[make_record("ss", 7)])
+            .await
+            .unwrap();
+        engine.flush().await.unwrap();
+        let r = engine.get_sync("ss", 7).unwrap();
+        assert_eq!(r.value, vec![1, 2, 3]);
+        engine.shutdown().await.unwrap();
+    }
+
+    /// Engine with default_ttl_secs set affects all writes via convert_records.
+    #[tokio::test]
+    async fn test_engine_with_default_ttl() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = make_config(dir.path());
+        cfg.default_ttl_secs = Some(u32::MAX as u64);
+        let engine = Engine::open(cfg).await.unwrap();
+        engine
+            .write_batch(&[make_record("dttl", 1)])
+            .await
+            .unwrap();
+        let r = engine.get("dttl", 1).await.unwrap().unwrap();
+        assert!(r.expire_at < i64::MAX);
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `metrics_text` returns a non-empty Prometheus-format string.
+    #[tokio::test]
+    async fn test_metrics_text_nonempty() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        let text = engine.metrics_text();
+        assert!(!text.is_empty());
+        assert!(text.contains("flowdb_"));
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `scan` with `ScanRange::all` after a flush covers the full-scan path
+    /// (the `is_full_scan` branch in `ScanIterator::build`).
+    #[tokio::test]
+    async fn test_scan_all_after_flush() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        engine
+            .write_batch(&[make_record("fa", 1), make_record("fb", 2)])
+            .await
+            .unwrap();
+        engine.flush().await.unwrap();
+        let r: Vec<_> = engine
+            .scan(ScanRange::all())
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(r.len() >= 2);
+        engine.shutdown().await.unwrap();
+    }
+
+    /// `delete_range` followed by `scan_all` exercises the tombstone filtering
+    /// path inside `ScanIterator::next` (merge-heap branch).
+    #[tokio::test]
+    async fn test_scan_all_with_tombstone_merge() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        // Multiple keys, then a delete tombstone forces dedup work.
+        engine
+            .write_batch(&[
+                make_record("tm1", 1),
+                make_record("tm2", 1),
+                make_record("tm3", 1),
+            ])
+            .await
+            .unwrap();
+        engine.flush().await.unwrap();
+        // Add a memtable-side delete to force memtable + SST merge with tombstone.
+        engine.delete_batch(&[("tm2".into(), 1)]).await.unwrap();
+        let r: Vec<_> = engine
+            .scan(ScanRange::all())
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        // tm2 is deleted, only tm1 and tm3 should remain.
+        assert!(r.iter().all(|x| x.key != b"tm2"));
+        engine.shutdown().await.unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // Regression tests for MemTable::get point-lookup correctness.
+    //
+    // These test the fix at the Engine API level: after a write then a
+    // delete with the same (key, ts), point lookups must NOT return the
+    // deleted data.  Before the fix, MemTable::get used `.next()` which
+    // returned the lowest-seq version, causing deleted data to reappear.
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_regression_get_after_delete_same_key_ts() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        engine
+            .write_batch(&[Record {
+                key: b"rd".to_vec(),
+                ts: 100,
+                expire_at: i64::MAX,
+                value: b"data".to_vec(),
+            }])
+            .await
+            .unwrap();
+        // Delete the exact same (key, ts).
+        engine
+            .delete_batch(&[("rd".into(), 100)])
+            .await
+            .unwrap();
+        // Point lookup must NOT find the deleted record.
+        assert!(
+            engine.get("rd", 100).await.unwrap().is_none(),
+            "get after delete must return None — the delete tombstone has higher seq"
+        );
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_regression_get_returns_latest_version() {
+        let dir = TempDir::new().unwrap();
+        let engine = Engine::open(make_config(dir.path())).await.unwrap();
+        // Write twice with the same (key, ts) but different values.
+        // write_batch assigns increasing seq numbers internally.
+        engine
+            .write_batch(&[Record {
+                key: b"ov".to_vec(),
+                ts: 50,
+                expire_at: i64::MAX,
+                value: b"v1".to_vec(),
+            }])
+            .await
+            .unwrap();
+        engine
+            .write_batch(&[Record {
+                key: b"ov".to_vec(),
+                ts: 50,
+                expire_at: i64::MAX,
+                value: b"v2".to_vec(),
+            }])
+            .await
+            .unwrap();
+        let r = engine.get("ov", 50).await.unwrap().unwrap();
+        assert_eq!(
+            r.value, b"v2",
+            "get must return the latest version (v2), not the stale one (v1)"
+        );
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_regression_config_validation_in_open() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = make_config(dir.path());
+        cfg.time_bucket_secs = 0;
+        let result = Engine::open(cfg).await;
+        assert!(
+            result.is_err(),
+            "Engine::open must reject time_bucket_secs=0 (div-by-zero)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_regression_config_memtable_zero_rejected() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = make_config(dir.path());
+        cfg.memtable_size_mb = 0;
+        let result = Engine::open(cfg).await;
+        assert!(result.is_err());
     }
 }

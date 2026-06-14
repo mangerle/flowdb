@@ -1,8 +1,33 @@
 use crate::error::{FlowError, Result};
 use crate::record::{InternalRecord, Op};
+use std::hash::Hasher;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Size of the per-record checksum trailer (4 bytes).
+const CHECKSUM_LEN: usize = 4;
+
+/// Computes a 4-byte checksum over `data` using `DefaultHasher` (SipHash-1-3).
+/// The lower 32 bits of the 64-bit hash are returned as big-endian bytes.
+fn compute_checksum(data: &[u8]) -> [u8; CHECKSUM_LEN] {
+    let mut h = std::hash::DefaultHasher::new();
+    h.write(data);
+    (h.finish() as u32).to_be_bytes()
+}
+
+/// Verifies the trailing checksum on a decoded record buffer.
+/// `record_bytes` is everything BEFORE the checksum trailer.
+/// `file_tail` is the remaining file data starting at the checksum position.
+/// Returns `true` if the checksum matches (or is too short to read → treated as
+/// corruption: returns `false`).
+fn verify_checksum(record_bytes: &[u8], file_tail: &[u8]) -> bool {
+    if file_tail.len() < CHECKSUM_LEN {
+        return false;
+    }
+    let expected = compute_checksum(record_bytes);
+    expected == file_tail[..CHECKSUM_LEN]
+}
 
 struct WalSegment {
     writer: std::io::BufWriter<std::fs::File>,
@@ -87,7 +112,7 @@ impl Wal {
         let mut max_seq = 0u64;
         let mut pos: usize = 0;
         while pos < data.len() {
-            if pos + 11 > data.len() {
+            if pos + 8 > data.len() {
                 break;
             }
             let seq = read_u64(&data[pos..pos + 8]);
@@ -128,6 +153,9 @@ impl Wal {
         }
         let val_len = read_u32(&data[pos..pos + 4]) as usize;
         pos += 4 + val_len;
+
+        // Account for the per-record checksum trailer.
+        pos += CHECKSUM_LEN;
 
         Ok(Some(pos - start))
     }
@@ -263,7 +291,8 @@ pub(crate) fn encode_batch(records: &[InternalRecord]) -> (Vec<u8>, u64) {
     (buf, total_mem_bytes)
 }
 
-/// Returns the exact encoded byte size of a single `InternalRecord`.
+/// Returns the exact encoded byte size of a single `InternalRecord`,
+/// including the per-record checksum trailer.
 pub(crate) fn encoded_size(rec: &InternalRecord) -> usize {
     8 + 1
         + 2
@@ -274,12 +303,14 @@ pub(crate) fn encoded_size(rec: &InternalRecord) -> usize {
         + rec.range_end.as_ref().map_or(0, |re| re.len())
         + 4
         + rec.value.len()
+        + CHECKSUM_LEN
 }
 
 /// Encodes a single record into `buf` in big-endian format.
 /// Layout: seq(8) | op(1) | key_len(2) | key | ts(8) | expire_at(8) |
-///         range_end_len(4) | range_end | val_len(4) | value
+///         range_end_len(4) | range_end | val_len(4) | value | checksum(4)
 pub(crate) fn encode_record(rec: &InternalRecord, buf: &mut Vec<u8>) {
+    let start = buf.len();
     buf.reserve(encoded_size(rec));
     buf.extend_from_slice(&rec.seq.to_be_bytes());
     buf.push(rec.op.to_u8());
@@ -298,10 +329,14 @@ pub(crate) fn encode_record(rec: &InternalRecord, buf: &mut Vec<u8>) {
     }
     buf.extend_from_slice(&(rec.value.len() as u32).to_be_bytes());
     buf.extend_from_slice(&rec.value);
+
+    // Append per-record checksum over all bytes written so far for this record.
+    let cksum = compute_checksum(&buf[start..]);
+    buf.extend_from_slice(&cksum);
 }
 
 /// Decodes one `InternalRecord` from the front of `data`.
-/// Uses the `read_*` helpers which convert via `data[..N].try_into().unwrap()`.
+/// Verifies the per-record checksum trailer.
 /// Returns `(record, bytes_consumed)` or `None` if data is truncated.
 fn decode_record(data: &[u8]) -> Result<Option<(InternalRecord, usize)>> {
     let mut pos = 0;
@@ -355,6 +390,16 @@ fn decode_record(data: &[u8]) -> Result<Option<(InternalRecord, usize)>> {
     }
     let value = data[pos..pos + val_len].to_vec();
     pos += val_len;
+
+    // Verify per-record checksum.
+    let record_bytes = &data[..pos];
+    let tail = &data[pos..];
+    if !verify_checksum(record_bytes, tail) {
+        // Checksum failure: either truncated or corrupted.  Treat like a
+        // truncated record so replay stops here.
+        return Ok(None);
+    }
+    pos += CHECKSUM_LEN;
 
     Ok(Some((
         InternalRecord {
@@ -543,14 +588,14 @@ mod tests {
         let result = wal.replay_from(0).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].key, b"k1");
-        assert_eq!(len, 8 + 1 + 2 + 2 + 8 + 8 + 4 + 4 + 3);
+        assert_eq!(len, 8 + 1 + 2 + 2 + 8 + 8 + 4 + 4 + 3 + CHECKSUM_LEN);
     }
 
     #[test]
     fn test_encoded_size() {
         let rec = make_record("hello", 100, 1);
         let size = encoded_size(&rec);
-        assert_eq!(size, 8 + 1 + 2 + 5 + 8 + 8 + 4 + 4 + 3);
+        assert_eq!(size, 8 + 1 + 2 + 5 + 8 + 8 + 4 + 4 + 3 + CHECKSUM_LEN);
     }
 
     #[test]
@@ -684,5 +729,77 @@ mod tests {
         assert!(seqs.contains(&20), "seq 20 (latest) must always survive");
         // Very old seqs should be gone.
         assert!(!seqs.contains(&1), "seq 1 should be gone (was in an old segment)");
+    }
+
+    #[test]
+    fn test_wal_checksum_rejects_corruption() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = Wal::open(dir.path(), 64).unwrap();
+
+        let recs = vec![make_record("key1", 100, 1), make_record("key2", 200, 2)];
+        let (buf, _) = encode_batch(&recs);
+        wal.write_encoded(&buf, 2).unwrap();
+
+        // Corrupt a byte in the middle of the WAL data.
+        let seg = wal.segments.first().unwrap();
+        let path = seg.path.clone();
+        drop(wal);
+
+        let mut data = std::fs::read(&path).unwrap();
+        let mid = data.len() / 2;
+        data[mid] ^= 0xFF;
+        std::fs::write(&path, &data).unwrap();
+
+        let mut wal2 = Wal::open(dir.path(), 64).unwrap();
+        let result = wal2.replay_from(0).unwrap();
+        // The first record might still decode if the corruption is in the second
+        // record's checksum area, but the corrupted record itself must be rejected.
+        // Either way, we must not get corrupted data back.
+        assert!(
+            result.len() <= 1,
+            "corrupted records should be rejected, got {} records",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn test_wal_checksum_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = Wal::open(dir.path(), 64).unwrap();
+
+        let recs = vec![
+            make_record("alpha", 1, 1),
+            make_record("beta", 2, 2),
+            make_record("gamma", 3, 3),
+        ];
+        let (buf, _) = encode_batch(&recs);
+        wal.write_encoded(&buf, 3).unwrap();
+
+        let result = wal.replay_from(0).unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].key, b"alpha".as_slice());
+        assert_eq!(result[1].key, b"beta".as_slice());
+        assert_eq!(result[2].key, b"gamma".as_slice());
+    }
+
+    #[test]
+    fn test_compute_checksum_deterministic() {
+        let data = b"hello world";
+        let cs1 = compute_checksum(data);
+        let cs2 = compute_checksum(data);
+        assert_eq!(cs1, cs2, "checksum must be deterministic");
+
+        let different_data = b"hello world!";
+        let cs3 = compute_checksum(different_data);
+        assert_ne!(cs1, cs3, "different data must have different checksums");
+    }
+
+    #[test]
+    fn test_verify_checksum_truncated() {
+        let record_bytes = b"some record data";
+        // Empty tail → should fail.
+        assert!(!verify_checksum(record_bytes, &[]));
+        // Tail too short (3 bytes) → should fail.
+        assert!(!verify_checksum(record_bytes, &[0, 0, 0]));
     }
 }
