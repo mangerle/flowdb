@@ -17,17 +17,20 @@ pub(crate) struct Wal {
     max_segment_bytes: u64,
     next_seq: AtomicU64,
     next_segment_id: u64,
+    dir_file: std::fs::File,
 }
 
 impl Wal {
     pub fn open(dir: &Path, segment_size_mb: u64) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
+        let dir_file = std::fs::File::open(dir)?;
         let mut wal = Self {
             dir: dir.to_path_buf(),
             segments: Vec::new(),
             max_segment_bytes: segment_size_mb * 1024 * 1024,
             next_seq: AtomicU64::new(1),
             next_segment_id: 1,
+            dir_file,
         };
         wal.load_existing()?;
         Ok(wal)
@@ -160,6 +163,18 @@ impl Wal {
         for seg in &mut self.segments {
             seg.writer.flush()?;
         }
+        Ok(())
+    }
+
+    /// Flush and fsync every segment, then fsync the parent directory so
+    /// directory entries (renames, creates) are durable. Must be called
+    /// before acknowledging a write as committed.
+    pub fn sync_all(&mut self) -> Result<()> {
+        for seg in &mut self.segments {
+            seg.writer.flush()?;
+            seg.writer.get_mut().sync_all()?;
+        }
+        self.dir_file.sync_all()?;
         Ok(())
     }
 

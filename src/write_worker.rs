@@ -2,7 +2,7 @@ use crate::block_meta_index::BlockMetaIndex;
 use crate::error::Result;
 use crate::manifest::{Manifest, ManifestEntry, SstInfo};
 use crate::memtable::MemTables;
-use crate::record::{Config, InternalRecord};
+use crate::record::{Config, InternalRecord, SyncMode};
 use crate::sstable::SstWriter;
 use crate::stats::StatsCounters;
 use crate::wal::Wal;
@@ -46,6 +46,7 @@ impl WriteWorker {
         wal_buf: &[u8],
         mem_bytes: u64,
         num_records: u64,
+        sync_mode: SyncMode,
     ) -> Result<()> {
         let bytes_written = mem_bytes;
 
@@ -57,6 +58,12 @@ impl WriteWorker {
             for rec in records {
                 active.insert(rec);
             }
+        }
+
+        // Durability: if the caller requested synchronous durability,
+        // fsync the WAL immediately so this batch survives a crash.
+        if sync_mode == SyncMode::Always {
+            self.wal.sync_all()?;
         }
 
         self.stats.add_wal_bytes(bytes_written);
@@ -116,6 +123,13 @@ impl WriteWorker {
 
         std::fs::rename(&tmp_path, &sst_path)?;
 
+        // Make the rename durable by fsyncing the SST directory.
+        // SstWriter::write already called sync_all on the file content,
+        // but the directory entry (the rename) is not durable until the
+        // parent directory's metadata is synced.
+        let sst_dir_file = std::fs::File::open(&sst_dir)?;
+        sst_dir_file.sync_all()?;
+
         let min_ts = all_records.iter().map(|r| r.ts).min().unwrap_or(0);
         let max_ts = all_records.iter().map(|r| r.ts).max().unwrap_or(0);
         let min_expire = all_records.iter().map(|r| r.expire_at).min().unwrap_or(0);
@@ -159,7 +173,7 @@ impl WriteWorker {
 
         {
             let _ = self.wal.truncate_before(last_seq);
-            let _ = self.wal.flush();
+            let _ = self.wal.sync_all();
         }
 
         let elapsed = start.elapsed();

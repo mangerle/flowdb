@@ -25,7 +25,7 @@ mod write_worker;
 
 pub use engine::{Engine, ScanIterator};
 pub use error::{FlowError, Result};
-pub use record::{Config, KeyFilter, Op, Query, ReadOptions, Record, ScanRange};
+pub use record::{Config, KeyFilter, Op, Query, ReadOptions, Record, ScanRange, SyncMode};
 pub use stats::EngineStats;
 
 #[cfg(feature = "server")]

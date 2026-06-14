@@ -5,7 +5,7 @@ use crate::error::{FlowError, Result};
 use crate::gc::GcRunner;
 use crate::manifest::{Manifest, ManifestEntry};
 use crate::memtable::MemTables;
-use crate::record::{Config, InternalRecord, KeyFilter, Op, Query, ReadOptions, Record, ScanRange};
+use crate::record::{Config, InternalRecord, KeyFilter, Op, Query, ReadOptions, Record, ScanRange, SyncMode};
 use crate::sstable::SstReader;
 use crate::stats::{EngineStats, StatsCounters};
 use crate::wal::Wal;
@@ -48,11 +48,20 @@ impl Engine {
         let compaction_threshold = self.config.compaction_threshold;
         let flush_interval = self.config.flush_interval_ms.max(1);
         let gc_interval = self.config.gc_interval_secs.max(1);
+        let wal_sync_mode = self.config.wal_sync_mode;
 
         let handle = tokio::task::spawn(async move {
             let mut flush_tick = tokio::time::interval(std::time::Duration::from_millis(flush_interval));
             let mut compact_tick = tokio::time::interval(std::time::Duration::from_secs(gc_interval.max(1)));
             let mut gc_tick = tokio::time::interval(std::time::Duration::from_secs(gc_interval));
+
+            // WAL sync tick for SyncMode::IntervalMs — coalesces multiple
+            // batches into a single disk sync at the given cadence.
+            let wal_sync_ms = match wal_sync_mode {
+                SyncMode::IntervalMs(ms) => ms.max(1),
+                _ => u64::MAX, // practically disabled for Always/None
+            };
+            let mut sync_tick = tokio::time::interval(std::time::Duration::from_millis(wal_sync_ms));
 
             loop {
                 tokio::select! {
@@ -88,6 +97,13 @@ impl Engine {
                             stats.clone(),
                         );
                         let _ = tokio::task::spawn_blocking(move || gc.run()).await;
+                    }
+                    _ = sync_tick.tick() => {
+                        let w = worker.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let mut wr = w.lock();
+                            let _ = wr.wal.sync_all();
+                        }).await;
                     }
                 }
             }
@@ -322,10 +338,11 @@ impl Engine {
     fn do_write(&self, records: Vec<InternalRecord>) -> Result<()> {
         let num_records = records.len() as u64;
         let (wal_buf, mem_bytes) = crate::wal::encode_batch(&records);
+        let sync_mode = self.config.wal_sync_mode;
         let start = std::time::Instant::now();
         self.worker
             .lock()
-            .process_batch_encoded(records, &wal_buf, mem_bytes, num_records)?;
+            .process_batch_encoded(records, &wal_buf, mem_bytes, num_records, sync_mode)?;
         self.stats
             .record_write_latency(start.elapsed().as_micros() as u64);
         Ok(())
@@ -1128,6 +1145,7 @@ mod tests {
             wal_segment_size_mb: 64,
             compaction_threshold: 2,
             create_if_missing: true,
+            wal_sync_mode: SyncMode::IntervalMs(u64::MAX),
         }
     }
 

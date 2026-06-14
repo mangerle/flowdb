@@ -1,4 +1,4 @@
-use flowdb::{Config, Engine, Query, Record};
+use flowdb::{Config, Engine, Query, Record, SyncMode};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,6 +32,7 @@ fn stress_config(dir: &Path) -> Config {
         wal_segment_size_mb: 64,
         compaction_threshold: 2,
         create_if_missing: true,
+        wal_sync_mode: SyncMode::Always,
     }
 }
 

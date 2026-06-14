@@ -155,6 +155,24 @@ impl InternalRecord {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SyncMode {
+    /// fsync the WAL after every write batch. Maximum durability, lower
+    /// throughput (each batch incurs a synchronous disk I/O).
+    Always,
+    /// fsync the WAL on a periodic tick (milliseconds). Balances durability
+    /// with throughput by coalescing multiple batches into a single fsync.
+    /// Requires the background maintenance task to be running.
+    IntervalMs(u64),
+}
+
+impl Default for SyncMode {
+    fn default() -> Self {
+        SyncMode::Always
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub data_dir: PathBuf,
@@ -172,6 +190,13 @@ pub struct Config {
     pub wal_segment_size_mb: u64,
     pub compaction_threshold: usize,
     pub create_if_missing: bool,
+    /// Controls how the WAL is synchronised to stable storage.
+    /// `Always` guarantees every acknowledged write is on disk before
+    /// returning. `IntervalMs(n)` batches fsync calls up to every _n_
+    /// milliseconds for higher throughput at the cost of potentially
+    /// losing the most recent writes on power failure.
+    #[serde(default)]
+    pub wal_sync_mode: SyncMode,
 }
 
 impl Default for Config {
@@ -192,6 +217,7 @@ impl Default for Config {
             wal_segment_size_mb: 64,
             compaction_threshold: 2,
             create_if_missing: true,
+            wal_sync_mode: SyncMode::Always,
         }
     }
 }

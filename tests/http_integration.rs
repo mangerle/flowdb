@@ -26,6 +26,7 @@ fn make_config(dir: &std::path::Path) -> Config {
         wal_segment_size_mb: 64,
         compaction_threshold: 2,
         create_if_missing: true,
+        wal_sync_mode: flowdb::SyncMode::Always,
     }
 }
 

@@ -97,11 +97,13 @@ pub(crate) struct ManifestState {
 pub(crate) struct Manifest {
     path: PathBuf,
     state: ManifestState,
+    dir_file: std::fs::File,
 }
 
 impl Manifest {
     pub fn open(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
+        let dir_file = std::fs::File::open(dir)?;
         let path = dir.join("MANIFEST");
         let mut state = ManifestState::default();
 
@@ -118,7 +120,11 @@ impl Manifest {
             }
         }
 
-        Ok(Self { path, state })
+        Ok(Self {
+            path,
+            state,
+            dir_file,
+        })
     }
 
     pub fn append(&mut self, entry: &ManifestEntry) -> Result<()> {
@@ -130,6 +136,8 @@ impl Manifest {
         use std::io::Write;
         writeln!(file, "{}", line)?;
         file.flush()?;
+        file.sync_all()?;
+        self.dir_file.sync_all()?;
 
         apply_entry(&mut self.state, entry);
         Ok(())

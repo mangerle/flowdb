@@ -109,6 +109,7 @@ fn flowdb_config(dir: &Path) -> Config {
         wal_segment_size_mb: 64,
         compaction_threshold: 1,
         create_if_missing: true,
+        wal_sync_mode: flowdb::SyncMode::Always,
     }
 }
 

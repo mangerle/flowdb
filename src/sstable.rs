@@ -267,6 +267,7 @@ impl SstWriter {
         }
 
         file.flush()?;
+        file.sync_all()?;
         Ok((total_bytes, block_infos, bloom))
     }
 }
