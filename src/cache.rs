@@ -31,9 +31,21 @@ pub(crate) struct BlockCache {
 }
 
 impl BlockCache {
+    #[allow(dead_code)]
     pub fn new(capacity_mb: usize) -> Self {
-        let per_shard = (capacity_mb * 1024 * 1024 / 256).max(1) / NUM_SHARDS;
-        let cap = NonZeroUsize::new(per_shard.max(1)).unwrap();
+        Self::with_block_size(capacity_mb, 100)
+    }
+
+    pub fn with_block_size(capacity_mb: usize, block_size: usize) -> Self {
+        // Estimate bytes per cache entry: each entry is a Vec<InternalRecord>
+        // of ~block_size records.  Per record we account the stack size of
+        // InternalRecord plus average heap allocations for key + value.
+        let stack_size = std::mem::size_of::<crate::record::InternalRecord>();
+        let avg_heap_per_record = 64; // conservative: avg key ~40B + value ~24B
+        let bytes_per_entry = block_size * (stack_size + avg_heap_per_record);
+        let total_entries = (capacity_mb * 1024 * 1024 / bytes_per_entry.max(1)).max(1);
+        let per_shard = (total_entries / NUM_SHARDS).max(1);
+        let cap = NonZeroUsize::new(per_shard).unwrap();
         let shards = (0..NUM_SHARDS)
             .map(|_| CacheShard {
                 lru: RwLock::new(LruCache::new(cap)),

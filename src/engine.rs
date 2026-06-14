@@ -61,6 +61,7 @@ impl Engine {
         let index = self.index.clone();
         let cache = self.cache.clone();
         let stats = self.stats.clone();
+        let readers = self.readers.clone();
         let data_dir = self.config.data_dir.clone();
         let block_size = self.config.block_size;
         let zstd_level = self.config.zstd_level;
@@ -122,7 +123,10 @@ impl Engine {
                                 cache.clone(),
                                 stats.clone(),
                             );
-                            let _ = compaction.run();
+                            if compaction.run().unwrap_or(false) {
+                                evict_stale_readers(&readers, &manifest);
+                                let _ = manifest.lock().maybe_snapshot();
+                            }
                         }
                         last_compact = std::time::Instant::now();
                     }
@@ -135,7 +139,9 @@ impl Engine {
                             cache.clone(),
                             stats.clone(),
                         );
-                        let _ = gc.run();
+                        if gc.run().unwrap_or(0) > 0 {
+                            evict_stale_readers(&readers, &manifest);
+                        }
                         last_gc = std::time::Instant::now();
                     }
 
@@ -253,7 +259,10 @@ impl Engine {
 
         let index = Arc::new(RwLock::new(index));
         let manifest = Arc::new(parking_lot::Mutex::new(manifest));
-        let cache = Arc::new(BlockCache::new(config.block_cache_capacity_mb));
+        let cache = Arc::new(BlockCache::with_block_size(
+            config.block_cache_capacity_mb,
+            config.block_size,
+        ));
         let readers = Arc::new(RwLock::new(HashMap::new()));
 
         let sst_count = manifest.lock().state().sstables.len();
@@ -799,12 +808,7 @@ impl Engine {
     /// manifest (i.e. deleted by GC or superseded by compaction).  This
     /// prevents file-descriptor / mmap leaks over long-running operations.
     fn evict_stale_readers(&self) {
-        let active_ssts: std::collections::HashSet<u32> = {
-            let mf = self.manifest.lock();
-            mf.state().sstables.keys().copied().collect()
-        };
-        let mut readers = self.readers.write();
-        readers.retain(|sst_id, _| active_ssts.contains(sst_id));
+        evict_stale_readers(&self.readers, &self.manifest);
     }
 
     // New iterator-based scan API (RocksDB-style)
@@ -969,9 +973,9 @@ impl ScanIterator {
             Vec::new();
 
         // For full scans, use read_block_decompress to avoid block cache overhead
-        // and consume records without cloning.
+        // and consume records without cloning.  Each block becomes its own
+        // source to avoid one giant contiguous allocation.
         if is_full_scan {
-            let mut all_sst_records: Vec<InternalRecord> = Vec::new();
             for meta in &candidates {
                 let reader =
                     match Engine::get_reader_from_map(&readers_snapshot, config, meta.sst_id) {
@@ -997,6 +1001,7 @@ impl ScanIterator {
                         continue;
                     }
                 };
+                let mut filtered: Vec<InternalRecord> = Vec::with_capacity(records.len());
                 for rec in records {
                     if rec.expire_at <= now_us {
                         continue;
@@ -1010,11 +1015,11 @@ impl ScanIterator {
                     if rec.op == Op::Delete {
                         continue;
                     }
-                    all_sst_records.push(rec);
+                    filtered.push(rec);
                 }
-            }
-            if !all_sst_records.is_empty() {
-                sst_sources.push(all_sst_records.into_iter().peekable());
+                if !filtered.is_empty() {
+                    sst_sources.push(filtered.into_iter().peekable());
+                }
             }
         } else {
             for meta in &candidates {
@@ -1242,6 +1247,23 @@ impl Iterator for ScanIterator {
 }
 
 impl std::iter::FusedIterator for ScanIterator {}
+
+/// Free-function version of [`Engine::evict_stale_readers`] usable from
+/// the background maintenance thread (which holds cloned `Arc`s, not
+/// `&Engine`).  Removes reader-cache entries whose SST IDs are no longer
+/// present in the manifest — this closes file descriptors and munmaps
+/// virtual memory for compacted/GC'd SSTs.
+fn evict_stale_readers(
+    readers: &Arc<RwLock<HashMap<u32, Arc<SstReader>>>>,
+    manifest: &Arc<parking_lot::Mutex<Manifest>>,
+) {
+    let active_ssts: std::collections::HashSet<u32> = {
+        let mf = manifest.lock();
+        mf.state().sstables.keys().copied().collect()
+    };
+    let mut rmap = readers.write();
+    rmap.retain(|sst_id, _| active_ssts.contains(sst_id));
+}
 
 fn now_micros() -> i64 {
     std::time::SystemTime::now()
@@ -2754,5 +2776,307 @@ mod tests {
         cfg.memtable_size_mb = 0;
         let result = Engine::open(cfg);
         assert!(result.is_err());
+    }
+
+    // ───── Regression: background compaction must evict stale readers ─────
+
+    /// After background compaction removes old SSTs, their `SstReader`
+    /// entries (open fd + mmap) must be evicted from the reader cache.
+    /// Without eviction, file descriptors and virtual memory leak
+    /// monotonically with every compaction cycle.
+    #[test]
+    fn test_background_compaction_evicts_stale_readers() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = make_config(dir.path());
+        cfg.compaction_threshold = 3;
+        cfg.flush_interval_ms = 60000; // prevent auto-flush interfering
+        cfg.auto_background = false;
+        let engine = Engine::open(cfg).unwrap();
+
+        // Write enough batches to create several SSTs.
+        for batch in 0..5u64 {
+            let records: Vec<Record> = (0..10)
+                .map(|i| Record {
+                    key: format!("k{:03}-{}", batch, i).into_bytes(),
+                    ts: (batch * 100 + i) as i64,
+                    expire_at: i64::MAX,
+                    value: vec![1, 2, 3],
+                })
+                .collect();
+            engine.write_batch(&records).unwrap();
+            engine.flush().unwrap();
+        }
+
+        // Populate the reader cache by doing point gets across all SSTs.
+        let _ = engine.get("k000-0", 0).unwrap();
+        let _ = engine.get("k001-0", 100).unwrap();
+        let _ = engine.get("k002-0", 200).unwrap();
+        let _ = engine.get("k003-0", 300).unwrap();
+        let _ = engine.get("k004-0", 400).unwrap();
+
+        // Snapshot reader count before compaction.
+        let readers_before = {
+            let r = engine.readers.read();
+            r.len()
+        };
+        assert!(readers_before >= 3, "should have cached several readers");
+
+        // Manually trigger compaction (same path the background thread uses).
+        let did = engine.trigger_compaction().unwrap();
+        assert!(did, "compaction should have merged SSTs");
+
+        // After compaction, stale readers must be evicted.
+        let readers_after = {
+            let r = engine.readers.read();
+            r.len()
+        };
+        assert!(
+            readers_after < readers_before,
+            "reader count should decrease after compaction: before={}, after={}",
+            readers_before,
+            readers_after
+        );
+
+        // Surviving readers must all point to active SSTs.
+        {
+            let mf = engine.manifest.lock();
+            let active: std::collections::HashSet<u32> =
+                mf.state().sstables.keys().copied().collect();
+            let r = engine.readers.read();
+            for sst_id in r.keys() {
+                assert!(
+                    active.contains(sst_id),
+                    "stale reader for sst {} survived eviction",
+                    sst_id
+                );
+            }
+        }
+
+        engine.shutdown().unwrap();
+    }
+
+    // ───── Regression: block cache capacity should respect byte budget ─────
+
+    /// The block cache should not dramatically exceed its configured byte
+    /// budget.  Before the fix, the `/256` heuristic allowed ~20× overshoot.
+    #[test]
+    fn test_cache_capacity_respects_byte_budget() {
+        use crate::cache::BlockCache;
+
+        // With block_size=100 and capacity_mb=1 (1 MB):
+        // Each entry ≈ 100 * (104 + 64) = 16,800 bytes
+        // Total entries = 1,048,576 / 16,800 ≈ 62
+        // Per shard = 62 / 64 = 0 → max(1) = 1
+        // Total = 64 entries * 16,800 ≈ 1.07 MB — within ~7% of budget.
+        let cache = BlockCache::with_block_size(1, 100);
+
+        // Insert a known number of entries and verify eviction kicks in.
+        let big_val = vec![0xABu8; 200]; // simulate realistic record
+        let mut inserted = 0;
+        for sst in 0..200u32 {
+            let rec = crate::record::InternalRecord {
+                seq: 0,
+                op: crate::record::Op::Put,
+                key: format!("key_{}", sst).into_bytes(),
+                ts: 0,
+                expire_at: i64::MAX,
+                value: big_val.clone(),
+                range_end: None,
+            };
+            // Each insert is a block of 100 records
+            let block: Vec<_> = (0..100).map(|_| rec.clone()).collect();
+            cache.insert(
+                crate::cache::CacheKey {
+                    sst_id: sst,
+                    block_idx: 0,
+                },
+                block,
+            );
+            inserted += 1;
+        }
+
+        // Most entries should have been evicted. We cannot check exact
+        // counts due to sharding, but the cache should hold far fewer
+        // than `inserted` entries.
+        // Verify by checking that early entries are evicted.
+        let early_hit = cache.get(&crate::cache::CacheKey {
+            sst_id: 0,
+            block_idx: 0,
+        });
+        assert!(
+            early_hit.is_none(),
+            "early entry should have been evicted (inserted={}, cache should be << inserted)",
+            inserted
+        );
+    }
+
+    // ───── Regression: full scan should use per-block sources ─────
+
+    /// A full scan should produce correct results.  This test verifies that
+    /// the per-block source refactor doesn't break full-scan semantics.
+    #[test]
+    fn test_full_scan_correctness_after_perblock_fix() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = make_config(dir.path());
+        cfg.block_size = 10; // small blocks to create many blocks
+        cfg.auto_background = false;
+        let engine = Engine::open(cfg).unwrap();
+
+        // Write enough records to span multiple blocks per SST.
+        let mut expected_keys = Vec::new();
+        for batch in 0..3u64 {
+            let records: Vec<Record> = (0..25)
+                .map(|i| {
+                    let key = format!("fs_{:04}", batch * 25 + i);
+                    expected_keys.push(key.clone());
+                    Record {
+                        key: key.into_bytes(),
+                        ts: (batch * 25 + i) as i64,
+                        expire_at: i64::MAX,
+                        value: vec![1],
+                    }
+                })
+                .collect();
+            engine.write_batch(&records).unwrap();
+            engine.flush().unwrap();
+        }
+
+        // Full scan via scan(ScanRange::all()).
+        let results: Vec<Record> = engine
+            .scan(ScanRange::all())
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // All non-deleted records should be returned.
+        assert_eq!(
+            results.len(),
+            expected_keys.len(),
+            "full scan must return all {} records, got {}",
+            expected_keys.len(),
+            results.len()
+        );
+
+        // Verify ascending key order.
+        for i in 1..results.len() {
+            assert!(
+                results[i - 1].key <= results[i].key,
+                "results must be in ascending key order at index {}",
+                i
+            );
+        }
+
+        engine.shutdown().unwrap();
+    }
+
+    // ───── Regression: manifest snapshot bounds on-disk growth ─────
+
+    /// The manifest should compact itself when it grows past the threshold.
+    #[test]
+    fn test_manifest_snapshot_compaction() {
+        let dir = TempDir::new().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        {
+            let mut mf = Manifest::open(&data_dir).unwrap();
+
+            // Append many entries (flush + delete cycles) to exceed
+            // SNAPSHOT_THRESHOLD (500).
+            for i in 0..600u32 {
+                mf.append(&ManifestEntry::Flush {
+                    seq: i as u64,
+                    sst: crate::manifest::SstInfo {
+                        id: i,
+                        records: 1,
+                        bytes: 16,
+                        min_ts: 0,
+                        max_ts: 0,
+                        min_expire: 0,
+                        max_expire: 0,
+                        bloom: None,
+                    },
+                    blocks: vec![],
+                })
+                .unwrap();
+
+                // Immediately delete older SSTs to keep the in-memory state small.
+                if i >= 5 {
+                    mf.append(&ManifestEntry::DeleteSst { sst_id: i - 5 })
+                        .unwrap();
+                }
+            }
+
+            // At this point: 1200 entries on disk, but only ~6 active SSTs.
+            assert!(mf.entry_count() > 500);
+
+            // Trigger snapshot.
+            mf.maybe_snapshot().unwrap();
+            assert!(
+                mf.entry_count() <= 20,
+                "entry_count should be small after snapshot, got {}",
+                mf.entry_count()
+            );
+        }
+
+        // Verify on-disk file is compacted.
+        let manifest_path = data_dir.join("MANIFEST");
+        let content = std::fs::read_to_string(&manifest_path).unwrap();
+        let line_count = content.lines().filter(|l| !l.trim().is_empty()).count();
+        assert!(
+            line_count <= 20,
+            "manifest file should be compact after snapshot, got {} lines",
+            line_count
+        );
+
+        // Verify reopen produces the same state.
+        let mf2 = Manifest::open(&data_dir).unwrap();
+        // Only the last few SSTs should survive (those not deleted).
+        assert!(
+            mf2.state().sstables.len() <= 10,
+            "after snapshot, only active SSTs should be present"
+        );
+    }
+
+    /// Manifest snapshot should be a no-op when below the threshold.
+    #[test]
+    fn test_manifest_snapshot_noop_below_threshold() {
+        let dir = TempDir::new().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let mut mf = Manifest::open(&data_dir).unwrap();
+        for i in 0..10u32 {
+            mf.append(&ManifestEntry::Flush {
+                seq: i as u64,
+                sst: crate::manifest::SstInfo {
+                    id: i,
+                    records: 1,
+                    bytes: 16,
+                    min_ts: 0,
+                    max_ts: 0,
+                    min_expire: 0,
+                    max_expire: 0,
+                    bloom: None,
+                },
+                blocks: vec![],
+            })
+            .unwrap();
+        }
+
+        let lines_before = std::fs::read_to_string(data_dir.join("MANIFEST"))
+            .unwrap()
+            .lines()
+            .count();
+        mf.maybe_snapshot().unwrap(); // should be no-op
+        let lines_after = std::fs::read_to_string(data_dir.join("MANIFEST"))
+            .unwrap()
+            .lines()
+            .count();
+
+        assert_eq!(
+            lines_before, lines_after,
+            "manifest should not change when below threshold"
+        );
     }
 }

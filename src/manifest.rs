@@ -98,7 +98,14 @@ pub(crate) struct Manifest {
     path: PathBuf,
     state: ManifestState,
     dir_file: std::fs::File,
+    /// Number of appended entries since the last snapshot.  Used by
+    /// [`maybe_snapshot`] to decide when to compact the log.
+    entry_count: usize,
 }
+
+/// Threshold: once the manifest exceeds this many lines, rewrite it as a
+/// compact snapshot of the current state.
+const SNAPSHOT_THRESHOLD: usize = 500;
 
 impl Manifest {
     pub fn open(dir: &Path) -> Result<Self> {
@@ -124,6 +131,7 @@ impl Manifest {
             path,
             state,
             dir_file,
+            entry_count: 0,
         })
     }
 
@@ -140,6 +148,73 @@ impl Manifest {
         self.dir_file.sync_all()?;
 
         apply_entry(&mut self.state, entry);
+        self.entry_count += 1;
+        Ok(())
+    }
+
+    /// If the manifest log has grown past [`SNAPSHOT_THRESHOLD`] entries,
+    /// rewrite it as a compact snapshot of the current state.  This bounds
+    /// on-disk growth and restart-replay time for long-running engines.
+    ///
+    /// The snapshot is written atomically: write to a temp file, `sync_all`,
+    /// then rename over the existing MANIFEST.
+    pub fn maybe_snapshot(&mut self) -> Result<()> {
+        if self.entry_count <= SNAPSHOT_THRESHOLD {
+            return Ok(());
+        }
+        self.snapshot()
+    }
+
+    /// Rewrite the manifest file as a compact snapshot of the current
+    /// in-memory state.  Each active SST is emitted as a `Flush` entry,
+    /// followed by a `Checkpoint` with the current `last_flushed_seq`.
+    fn snapshot(&mut self) -> Result<()> {
+        use std::io::Write;
+
+        let tmp_path = self.path.with_extension("MANIFEST.tmp");
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)?;
+
+            for (sst_id, info) in &self.state.sstables {
+                let blocks = self
+                    .state
+                    .block_infos
+                    .get(sst_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let entry = ManifestEntry::Flush {
+                    seq: self.state.last_flushed_seq,
+                    sst: info.clone(),
+                    blocks,
+                };
+                let line = serde_json::to_string(&entry)?;
+                writeln!(file, "{}", line)?;
+            }
+
+            let checkpoint = ManifestEntry::Checkpoint {
+                last_flushed_seq: self.state.last_flushed_seq,
+            };
+            let line = serde_json::to_string(&checkpoint)?;
+            writeln!(file, "{}", line)?;
+
+            file.flush()?;
+            file.sync_all()?;
+        }
+
+        // Atomic rename
+        std::fs::rename(&tmp_path, &self.path)?;
+        self.dir_file.sync_all()?;
+        self.entry_count = self.state.sstables.len() + 1;
+
+        tracing::info!(
+            "Manifest snapshot complete: {} active SSTs, {} entries",
+            self.state.sstables.len(),
+            self.entry_count
+        );
         Ok(())
     }
 
@@ -149,6 +224,12 @@ impl Manifest {
 
     pub fn next_sst_id(&self) -> u32 {
         self.state.sstables.keys().max().copied().unwrap_or(0) + 1
+    }
+
+    /// Number of entries appended since the last snapshot (or since open).
+    #[cfg(test)]
+    pub fn entry_count(&self) -> usize {
+        self.entry_count
     }
 }
 
