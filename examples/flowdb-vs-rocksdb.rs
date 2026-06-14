@@ -367,7 +367,7 @@ async fn bench_flowdb_seq_write(engine: &Engine, n: u64, batch: usize) -> BenchR
             });
             key_counter += 1;
         }
-        engine.write_batch_owned(records).await.unwrap();
+        engine.write_batch_owned(records).unwrap();
     }
     let elapsed = start.elapsed();
     let throughput = n as f64 / elapsed.as_secs_f64();

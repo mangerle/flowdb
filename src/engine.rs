@@ -267,12 +267,12 @@ impl Engine {
         Ok(engine)
     }
 
-    pub async fn write_batch(&self, batch: &[Record]) -> Result<()> {
-        self.write_batch_ttl(batch, None).await
+    pub fn write_batch(&self, batch: &[Record]) -> Result<()> {
+        self.write_batch_ttl(batch, None)
     }
 
-    pub async fn write_batch_owned(&self, batch: Vec<Record>) -> Result<()> {
-        self.write_batch_owned_ttl(batch, None).await
+    pub fn write_batch_owned(&self, batch: Vec<Record>) -> Result<()> {
+        self.write_batch_owned_ttl(batch, None)
     }
 
     pub fn write_batch_sync(&self, batch: Vec<Record>) -> Result<()> {
@@ -309,7 +309,7 @@ impl Engine {
             .collect()
     }
 
-    async fn write_batch_owned_ttl(&self, batch: Vec<Record>, ttl_secs: Option<u64>) -> Result<()> {
+    fn write_batch_owned_ttl(&self, batch: Vec<Record>, ttl_secs: Option<u64>) -> Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
@@ -317,7 +317,7 @@ impl Engine {
         self.do_write(records)
     }
 
-    pub async fn write_batch_ttl(&self, batch: &[Record], ttl_secs: Option<u64>) -> Result<()> {
+    pub fn write_batch_ttl(&self, batch: &[Record], ttl_secs: Option<u64>) -> Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
@@ -349,12 +349,18 @@ impl Engine {
 
     fn do_write(&self, records: Vec<InternalRecord>) -> Result<()> {
         let num_records = records.len() as u64;
+        let batch_max_seq = records.last().map(|r| r.seq).unwrap_or(0);
         let (wal_buf, mem_bytes) = crate::wal::encode_batch(&records);
         let sync_mode = self.config.wal_sync_mode;
         let start = std::time::Instant::now();
-        self.worker
-            .lock()
-            .process_batch_encoded(records, &wal_buf, mem_bytes, num_records, sync_mode)?;
+        self.worker.lock().process_batch_encoded(
+            records,
+            &wal_buf,
+            mem_bytes,
+            num_records,
+            batch_max_seq,
+            sync_mode,
+        )?;
         self.stats
             .record_write_latency(start.elapsed().as_micros() as u64);
         Ok(())
@@ -513,7 +519,7 @@ impl Engine {
         None
     }
 
-    pub async fn delete_batch(&self, keys_ts: &[(String, i64)]) -> Result<()> {
+    pub fn delete_batch(&self, keys_ts: &[(String, i64)]) -> Result<()> {
         if keys_ts.is_empty() {
             return Ok(());
         }
@@ -531,7 +537,7 @@ impl Engine {
         self.do_write(records)
     }
 
-    pub async fn delete_range(&self, start_key: &str, end_key: &str) -> Result<()> {
+    pub fn delete_range(&self, start_key: &str, end_key: &str) -> Result<()> {
         let seq = self
             .seq_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -543,14 +549,14 @@ impl Engine {
         self.do_write(vec![record])
     }
 
-    pub async fn patch_record(
+    pub fn patch_record(
         &self,
         key: &str,
         ts: i64,
         new_value: Option<Vec<u8>>,
         new_ttl_secs: Option<u64>,
     ) -> Result<Record> {
-        let existing = self.get(key, ts).await?;
+        let existing = self.get_sync(key, ts);
         let mut rec = match existing {
             Some(r) => r,
             None => {
@@ -568,7 +574,7 @@ impl Engine {
             rec.expire_at = rec.ts + (ttl as i64 * 1_000_000);
         }
 
-        self.write_batch(&[rec.clone()]).await?;
+        self.write_batch(&[rec.clone()])?;
         Ok(rec)
     }
 
@@ -1267,7 +1273,6 @@ mod tests {
                 make_record("key2", 200),
                 make_record("key3", 300),
             ])
-            .await
             .unwrap();
 
         let results = engine.query_by_prefix("key1").await.unwrap();
@@ -1290,7 +1295,6 @@ mod tests {
                 make_record("c", 300),
                 make_record("d", 400),
             ])
-            .await
             .unwrap();
 
         let results = engine.query_by_key_range("b", "c").await.unwrap();
@@ -1311,7 +1315,6 @@ mod tests {
                 make_record("b", 200),
                 make_record("c", 300),
             ])
-            .await
             .unwrap();
 
         let results = engine.query_time_range(150, 300).await.unwrap();
@@ -1333,7 +1336,6 @@ mod tests {
                 make_record("a", 300),
                 make_record("b", 200),
             ])
-            .await
             .unwrap();
 
         let results = engine.query_prefix_time_range("a", 150, 250).await.unwrap();
@@ -1351,7 +1353,7 @@ mod tests {
 
         let mut rec = make_record("exp", 100);
         rec.expire_at = 1;
-        engine.write_batch(&[rec]).await.unwrap();
+        engine.write_batch(&[rec]).unwrap();
 
         let results = engine.query_by_prefix("exp").await.unwrap();
         assert!(results.is_empty());
@@ -1369,7 +1371,7 @@ mod tests {
         let records: Vec<Record> = (0..50)
             .map(|i| make_record(&format!("key_{:04}", i), i * 10))
             .collect();
-        engine.write_batch(&records).await.unwrap();
+        engine.write_batch(&records).unwrap();
 
         engine.flush().await.unwrap();
 
@@ -1387,7 +1389,6 @@ mod tests {
 
         engine
             .write_batch(&[make_record("a", 100), make_record("b", 200)])
-            .await
             .unwrap();
 
         let stats = engine.stats();
@@ -1406,7 +1407,6 @@ mod tests {
             let engine = Engine::open(config.clone()).await.unwrap();
             engine
                 .write_batch(&[make_record("a", 100), make_record("b", 200)])
-                .await
                 .unwrap();
             engine.shutdown().await.unwrap();
         }
@@ -1436,7 +1436,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 for i in 0..25u64 {
                     let rec = make_record(&format!("t{}-{}", t, i), (t * 100 + i) as i64);
-                    e.write_batch(&[rec]).await.unwrap();
+                    e.write_batch(&[rec]).unwrap();
                 }
             }));
         }
@@ -1468,7 +1468,7 @@ mod tests {
                     value: vec![1, 2, 3],
                 })
                 .collect();
-            engine.write_batch(&records).await.unwrap();
+            engine.write_batch(&records).unwrap();
             engine.flush().await.unwrap();
         }
 
@@ -1501,7 +1501,7 @@ mod tests {
             })
             .collect();
 
-        engine.write_batch_ttl(&records, Some(1)).await.unwrap();
+        engine.write_batch_ttl(&records, Some(1)).unwrap();
         engine.flush().await.unwrap();
 
         let results = engine.query_by_prefix("gc_key_").await.unwrap();
@@ -1531,10 +1531,9 @@ mod tests {
                 make_record("c", 300),
                 make_record("d", 400),
             ])
-            .await
             .unwrap();
 
-        engine.delete_range("b", "d").await.unwrap();
+        engine.delete_range("b", "d").unwrap();
 
         let results = engine.query_by_key_range("a", "d").await.unwrap();
         assert_eq!(results.len(), 2);
@@ -1556,11 +1555,10 @@ mod tests {
                 make_record("s2", 200),
                 make_record("s3", 300),
             ])
-            .await
             .unwrap();
         engine.flush().await.unwrap();
 
-        engine.delete_range("s1", "s3").await.unwrap();
+        engine.delete_range("s1", "s3").unwrap();
         engine.flush().await.unwrap();
 
         let results = engine.query_by_prefix("s").await.unwrap();
@@ -1585,7 +1583,7 @@ mod tests {
                     value: vec![1, 2, 3],
                 })
                 .collect();
-            engine.write_batch(&records).await.unwrap();
+            engine.write_batch(&records).unwrap();
             engine.flush().await.unwrap();
         }
 
@@ -1612,10 +1610,9 @@ mod tests {
                 make_record("y-a", 100),
                 make_record("y-b", 200),
             ])
-            .await
             .unwrap();
 
-        engine.delete_range("x-a", "x-c").await.unwrap();
+        engine.delete_range("x-a", "x-c").unwrap();
 
         let x_results = engine.query_by_prefix("x-").await.unwrap();
         assert_eq!(x_results.len(), 1);
@@ -1641,7 +1638,6 @@ mod tests {
                 make_record("alpha", 200),
                 make_record("beta", 150),
             ])
-            .await
             .unwrap();
 
         let records: Vec<Record> = engine
@@ -1669,7 +1665,6 @@ mod tests {
                 make_record("k1", 30),
                 make_record("k2", 15),
             ])
-            .await
             .unwrap();
 
         let records: Vec<Record> = engine
@@ -1695,7 +1690,6 @@ mod tests {
                 make_record("b", 2),
                 make_record("c", 3),
             ])
-            .await
             .unwrap();
 
         let records: Vec<Record> = engine
@@ -1725,7 +1719,6 @@ mod tests {
                 make_record("c", 3),
                 make_record("d", 4),
             ])
-            .await
             .unwrap();
 
         let records: Vec<Record> = engine
@@ -1750,7 +1743,6 @@ mod tests {
                 make_record("b", 200),
                 make_record("c", 300),
             ])
-            .await
             .unwrap();
 
         let records: Vec<Record> = engine
@@ -1773,7 +1765,7 @@ mod tests {
         let records: Vec<Record> = (0..50)
             .map(|i| make_record(&format!("key_{:04}", i), i * 10))
             .collect();
-        engine.write_batch(&records).await.unwrap();
+        engine.write_batch(&records).unwrap();
 
         // scan and query should return the same results
         let scan_results: Vec<Record> = engine
@@ -1804,7 +1796,6 @@ mod tests {
                 make_record("s2", 200),
                 make_record("s3", 300),
             ])
-            .await
             .unwrap();
         engine.flush().await.unwrap();
 
@@ -1831,10 +1822,9 @@ mod tests {
                 make_record("c", 300),
                 make_record("d", 400),
             ])
-            .await
             .unwrap();
 
-        engine.delete_range("b", "d").await.unwrap();
+        engine.delete_range("b", "d").unwrap();
 
         let records: Vec<Record> = engine
             .scan(ScanRange::key_range("a", "d"))
@@ -1854,7 +1844,7 @@ mod tests {
         let config = make_config(dir.path());
         let engine = Engine::open(config).await.unwrap();
 
-        engine.write_batch(&[make_record("a", 1)]).await.unwrap();
+        engine.write_batch(&[make_record("a", 1)]).unwrap();
 
         let records: Vec<Record> = engine
             .scan_prefix("nonexistent")
@@ -1879,7 +1869,6 @@ mod tests {
                 make_record("key1", 200),
                 make_record("key2", 500),
             ])
-            .await
             .unwrap();
 
         let latest = engine.get_latest("key1").unwrap();
@@ -1908,12 +1897,11 @@ mod tests {
                 make_record("k", 20),
                 make_record("k", 30),
             ])
-            .await
             .unwrap();
         engine.flush().await.unwrap();
 
         // Write a newer record to memtable
-        engine.write_batch(&[make_record("k", 99)]).await.unwrap();
+        engine.write_batch(&[make_record("k", 99)]).unwrap();
 
         let latest = engine.get_latest("k").unwrap();
         assert!(latest.is_some());
@@ -1937,7 +1925,6 @@ mod tests {
                     expire_at: i64::MAX,
                     value: vec![42u8; 32],
                 }])
-                .await
                 .unwrap();
         }
 
@@ -1961,7 +1948,7 @@ mod tests {
         let config = make_config(dir.path());
         let engine = Engine::open(config).await.unwrap();
 
-        engine.write_batch(&[make_record("x", 1)]).await.unwrap();
+        engine.write_batch(&[make_record("x", 1)]).unwrap();
 
         let opts = ReadOptions {
             fill_cache: false,
@@ -1989,14 +1976,12 @@ mod tests {
             // First batch — will be flushed
             engine
                 .write_batch(&[make_record("flushed", 100)])
-                .await
                 .unwrap();
             engine.flush().await.unwrap();
 
             // Second batch — stays in memtable + WAL
             engine
                 .write_batch(&[make_record("post-flush", 200)])
-                .await
                 .unwrap();
 
             // Don't call shutdown — simulate crash after the first flush.
@@ -2062,7 +2047,6 @@ mod tests {
         // Write some data.
         engine
             .write_batch(&[make_record("a", 1), make_record("b", 2)])
-            .await
             .unwrap();
 
         // Flush from a spawn_blocking context should work.
@@ -2105,7 +2089,7 @@ mod tests {
                 value: vec![1, 2, 3],
             })
             .collect();
-        engine.write_batch(&records).await.unwrap();
+        engine.write_batch(&records).unwrap();
         engine.flush().await.unwrap();
         engine.shutdown().await.unwrap();
 
@@ -2204,7 +2188,7 @@ mod tests {
             .collect();
         {
             let engine = Engine::open(config.clone()).await.unwrap();
-            engine.write_batch(&records).await.unwrap();
+            engine.write_batch(&records).unwrap();
             engine.flush().await.unwrap();
             engine.shutdown().await.unwrap();
         }
@@ -2234,7 +2218,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config = make_config(dir.path());
         let engine = Engine::open(config).await.unwrap();
-        assert!(engine.write_batch(&[]).await.is_ok());
+        assert!(engine.write_batch(&[]).is_ok());
         engine.shutdown().await.unwrap();
     }
 
@@ -2243,7 +2227,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config = make_config(dir.path());
         let engine = Engine::open(config).await.unwrap();
-        assert!(engine.delete_batch(&[]).await.is_ok());
+        assert!(engine.delete_batch(&[]).is_ok());
         engine.shutdown().await.unwrap();
     }
 
@@ -2262,7 +2246,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config = make_config(dir.path());
         let engine = Engine::open(config).await.unwrap();
-        let result = engine.patch_record("no_such_key", 0, Some(vec![1, 2, 3]), None).await;
+        let result = engine.patch_record("no_such_key", 0, Some(vec![1, 2, 3]), None);
         assert!(result.is_err());
         engine.shutdown().await.unwrap();
     }
@@ -2274,7 +2258,7 @@ mod tests {
         let engine = Engine::open(config).await.unwrap();
         // Empty start and end strings — should not panic, produce a valid delete
         // range tombstone.
-        assert!(engine.delete_range("", "z").await.is_ok());
+        assert!(engine.delete_range("", "z").is_ok());
         engine.shutdown().await.unwrap();
     }
 
@@ -2355,7 +2339,6 @@ mod tests {
         // Write a record so the flush tick has something to do.
         engine
             .write_batch(&[make_record("bg", 1)])
-            .await
             .unwrap();
         // Yield to let the maintenance task tick at least once.
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
@@ -2386,7 +2369,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let engine = Engine::open(make_config(dir.path())).await.unwrap();
         let records = vec![make_record("owned1", 1), make_record("owned2", 2)];
-        engine.write_batch_owned(records).await.unwrap();
+        engine.write_batch_owned(records).unwrap();
         let r = engine.get("owned1", 1).await.unwrap();
         assert!(r.is_some());
         engine.shutdown().await.unwrap();
@@ -2412,7 +2395,7 @@ mod tests {
     async fn test_write_batch_owned_empty() {
         let dir = TempDir::new().unwrap();
         let engine = Engine::open(make_config(dir.path())).await.unwrap();
-        engine.write_batch_owned(vec![]).await.unwrap();
+        engine.write_batch_owned(vec![]).unwrap();
         engine.shutdown().await.unwrap();
     }
 
@@ -2424,7 +2407,6 @@ mod tests {
         let engine = Engine::open(make_config(dir.path())).await.unwrap();
         engine
             .write_batch_ttl(&[make_record("ttl1", 1)], Some(u32::MAX as u64))
-            .await
             .unwrap();
         let r = engine.get("ttl1", 1).await.unwrap().unwrap();
         assert!(r.expire_at < i64::MAX);
@@ -2438,7 +2420,6 @@ mod tests {
         let engine = Engine::open(make_config(dir.path())).await.unwrap();
         engine
             .write_batch_owned_ttl(vec![make_record("ot", 1)], Some(u32::MAX as u64))
-            .await
             .unwrap();
         let r = engine.get("ot", 1).await.unwrap().unwrap();
         assert!(r.expire_at < i64::MAX);
@@ -2462,7 +2443,6 @@ mod tests {
         let engine = Engine::open(make_config(dir.path())).await.unwrap();
         engine
             .write_batch(&[make_record("gl", 1), make_record("gl", 5), make_record("gl", 3)])
-            .await
             .unwrap();
         let latest = engine.get_latest_async("gl").await.unwrap().unwrap();
         assert_eq!(latest.ts, 5);
@@ -2483,7 +2463,7 @@ mod tests {
     async fn test_delete_batch_empty_noop() {
         let dir = TempDir::new().unwrap();
         let engine = Engine::open(make_config(dir.path())).await.unwrap();
-        engine.delete_batch(&[]).await.unwrap();
+        engine.delete_batch(&[]).unwrap();
         engine.shutdown().await.unwrap();
     }
 
@@ -2493,8 +2473,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let engine = Engine::open(make_config(dir.path())).await.unwrap();
         let err = engine
-            .patch_record("ghost", 1, Some(b"v".to_vec()), None)
-            .await;
+            .patch_record("ghost", 1, Some(b"v".to_vec()), None);
         assert!(err.is_err());
         engine.shutdown().await.unwrap();
     }
@@ -2506,11 +2485,9 @@ mod tests {
         let engine = Engine::open(make_config(dir.path())).await.unwrap();
         engine
             .write_batch(&[make_record("p", 1)])
-            .await
             .unwrap();
         let patched = engine
             .patch_record("p", 1, Some(b"new".to_vec()), Some(u32::MAX as u64))
-            .await
             .unwrap();
         assert_eq!(patched.value, b"new");
         assert!(patched.expire_at < i64::MAX);
@@ -2530,7 +2507,6 @@ mod tests {
                 make_record("k1", 20),
                 make_record("k2", 30),
             ])
-            .await
             .unwrap();
 
         assert_eq!(engine.query_by_prefix("k1").await.unwrap().len(), 2);
@@ -2554,7 +2530,6 @@ mod tests {
         let engine = Engine::open(make_config(dir.path())).await.unwrap();
         engine
             .write_batch(&[make_record("c1", 1), make_record("c2", 2)])
-            .await
             .unwrap();
         let r: Vec<_> = engine
             .scan_prefix_time_range("c", 0, 100)
@@ -2574,7 +2549,6 @@ mod tests {
             let engine = Engine::open(make_config(dir.path())).await.unwrap();
             engine
                 .write_batch(&[make_record("persisted", 1)])
-                .await
                 .unwrap();
             engine.flush().await.unwrap();
             engine.shutdown().await.unwrap();
@@ -2594,7 +2568,6 @@ mod tests {
         let engine = Engine::open(make_config(dir.path())).await.unwrap();
         engine
             .write_batch(&[make_record("ss", 7)])
-            .await
             .unwrap();
         engine.flush().await.unwrap();
         let r = engine.get_sync("ss", 7).unwrap();
@@ -2611,7 +2584,6 @@ mod tests {
         let engine = Engine::open(cfg).await.unwrap();
         engine
             .write_batch(&[make_record("dttl", 1)])
-            .await
             .unwrap();
         let r = engine.get("dttl", 1).await.unwrap().unwrap();
         assert!(r.expire_at < i64::MAX);
@@ -2637,7 +2609,6 @@ mod tests {
         let engine = Engine::open(make_config(dir.path())).await.unwrap();
         engine
             .write_batch(&[make_record("fa", 1), make_record("fb", 2)])
-            .await
             .unwrap();
         engine.flush().await.unwrap();
         let r: Vec<_> = engine
@@ -2662,11 +2633,10 @@ mod tests {
                 make_record("tm2", 1),
                 make_record("tm3", 1),
             ])
-            .await
             .unwrap();
         engine.flush().await.unwrap();
         // Add a memtable-side delete to force memtable + SST merge with tombstone.
-        engine.delete_batch(&[("tm2".into(), 1)]).await.unwrap();
+        engine.delete_batch(&[("tm2".into(), 1)]).unwrap();
         let r: Vec<_> = engine
             .scan(ScanRange::all())
             .unwrap()
@@ -2697,12 +2667,10 @@ mod tests {
                 expire_at: i64::MAX,
                 value: b"data".to_vec(),
             }])
-            .await
             .unwrap();
         // Delete the exact same (key, ts).
         engine
             .delete_batch(&[("rd".into(), 100)])
-            .await
             .unwrap();
         // Point lookup must NOT find the deleted record.
         assert!(
@@ -2725,7 +2693,6 @@ mod tests {
                 expire_at: i64::MAX,
                 value: b"v1".to_vec(),
             }])
-            .await
             .unwrap();
         engine
             .write_batch(&[Record {
@@ -2734,7 +2701,6 @@ mod tests {
                 expire_at: i64::MAX,
                 value: b"v2".to_vec(),
             }])
-            .await
             .unwrap();
         let r = engine.get("ov", 50).await.unwrap().unwrap();
         assert_eq!(

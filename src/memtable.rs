@@ -1,69 +1,48 @@
 use crate::record::InternalRecord;
 use parking_lot::RwLock;
-use std::collections::BTreeMap;
 
-/// A single memtable backed by a `BTreeMap` keyed by `(key, ts, seq)`.
+/// A single memtable backed by a `Vec<InternalRecord>`.
 ///
-/// The active memtable (hot write path) and frozen memtables share this
-/// representation. Previously the active table used a `Vec` + hash index
-/// (fast O(1) insert, but O(n) range scans and an O(n log n) freeze-time
-/// conversion to BTreeMap). Unifying on BTreeMap gives:
+/// The active memtable uses an **unsorted Vec** for O(1) writes (no key
+/// clone, no BTreeMap traversal). On freeze, the Vec is sorted in-place
+/// by `(key, ts, seq)` to support efficient range queries and SST flush.
 ///
-/// * `insert`  : O(log n)  — slightly slower than Vec::push, but still fast
-/// * `get`     : O(log n)  — was O(1) via hash index, now BTreeMap range
-/// * `query_*` : O(log n + k) — was O(n) full scan; huge win on hot reads
-/// * `freeze`  : O(1)      — was O(n log n) + n clones; flush no longer
-///                           blocks writes for the conversion window
-///
-/// The `(key, ts, seq)` tuple preserves LSM semantics: multiple versions of
-/// the same `(key, ts)` with different seq numbers coexist, and the read
-/// path resolves the winner by comparing `seq`.
+/// Write path:  `insert` is O(1) — just a Vec push.
+/// Read path:   `get` / `query_*` are O(n) linear scans on the active
+///              table. This is acceptable because reads typically hit
+///              SSTables (via bloom filter + block index), and the active
+///              table is flushed quickly.
+/// Freeze path: `sort()` is O(n log n) — called once per flush cycle.
 pub(crate) struct MemTable {
-    map: BTreeMap<(Vec<u8>, i64, u64), InternalRecord>,
+    records: Vec<InternalRecord>,
     bytes: usize,
 }
 
 impl MemTable {
     pub fn new() -> Self {
         Self {
-            map: BTreeMap::new(),
+            records: Vec::new(),
             bytes: 0,
         }
     }
 
     pub fn insert(&mut self, rec: InternalRecord) {
-        let size = rec.estimated_size();
-        let key = (rec.key.clone(), rec.ts, rec.seq);
-        if let Some(old) = self.map.insert(key, rec) {
-            // Same (key, ts, seq) already present — replace and adjust bytes.
-            // In practice this is rare (would require the same seq to be
-            // written twice), but we handle it for correctness.
-            self.bytes = self.bytes.saturating_sub(old.estimated_size());
-        }
-        self.bytes += size;
+        self.bytes += rec.estimated_size();
+        self.records.push(rec);
     }
 
     pub fn get(&self, key: &[u8], ts: i64) -> Option<&InternalRecord> {
-        // Range over all seq numbers for this (key, ts). Returns the
-        // highest-seq record (last in BTreeMap order since seq is the
-        // tuple's 3rd element and sorts ascending).
-        //
-        // CORRECTNESS: We use `.next_back()` to get the LAST entry in the
-        // range (highest seq). Using `.next()` would return the FIRST entry
-        // (lowest seq), causing stale reads after delete/patch operations.
-        let start = (key.to_vec(), ts, u64::MIN);
-        let end = (key.to_vec(), ts, u64::MAX);
-        self.map.range(start..=end).next_back().map(|(_, v)| v)
+        // Linear scan for the highest-seq record matching (key, ts).
+        self.records
+            .iter()
+            .rev()
+            .find(|r| r.key.as_slice() == key && r.ts == ts)
     }
 
     pub fn query_prefix(&self, key: &[u8], now_us: i64) -> Vec<&InternalRecord> {
-        let start = (key.to_vec(), i64::MIN, u64::MIN);
-        let prefix_end = increment_prefix(key);
-        let end = (prefix_end, i64::MIN, u64::MIN);
-        self.map
-            .range(start..end)
-            .filter(|(_, v)| v.expire_at >= now_us)
-            .map(|(_, v)| v)
+        self.records
+            .iter()
+            .filter(|r| r.key.starts_with(key) && r.expire_at >= now_us)
             .collect()
     }
 
@@ -73,12 +52,13 @@ impl MemTable {
         end_key: &[u8],
         now_us: i64,
     ) -> Vec<&InternalRecord> {
-        let start = (start_key.to_vec(), i64::MIN, u64::MIN);
-        let end = (end_key.to_vec(), i64::MAX, u64::MAX);
-        self.map
-            .range(start..=end)
-            .filter(|(_, v)| v.expire_at >= now_us)
-            .map(|(_, v)| v)
+        self.records
+            .iter()
+            .filter(|r| {
+                r.key.as_slice() >= start_key
+                    && r.key.as_slice() <= end_key
+                    && r.expire_at >= now_us
+            })
             .collect()
     }
 
@@ -88,14 +68,9 @@ impl MemTable {
         ts_end: i64,
         now_us: i64,
     ) -> Vec<&InternalRecord> {
-        // No key bound — walk the whole map. Time-bounded scans are rare
-        // (typically paired with a key filter), so the linear filter is
-        // acceptable. The BTreeMap ordering is by key first, so we cannot
-        // use the tree to prune on ts alone.
-        self.map
+        self.records
             .iter()
-            .filter(|((_, ts, _), v)| *ts >= ts_start && *ts <= ts_end && v.expire_at >= now_us)
-            .map(|(_, v)| v)
+            .filter(|r| r.ts >= ts_start && r.ts <= ts_end && r.expire_at >= now_us)
             .collect()
     }
 
@@ -106,18 +81,14 @@ impl MemTable {
         ts_end: i64,
         now_us: i64,
     ) -> Vec<&InternalRecord> {
-        let start = (key.to_vec(), ts_start, u64::MIN);
-        let prefix_end = increment_prefix(key);
-        let end = (prefix_end, i64::MIN, u64::MIN);
-        self.map
-            .range(start..end)
-            .filter(|((k, ts, _), v)| {
-                k.starts_with(key)
-                    && *ts >= ts_start
-                    && *ts <= ts_end
-                    && v.expire_at >= now_us
+        self.records
+            .iter()
+            .filter(|r| {
+                r.key.starts_with(key)
+                    && r.ts >= ts_start
+                    && r.ts <= ts_end
+                    && r.expire_at >= now_us
             })
-            .map(|(_, v)| v)
             .collect()
     }
 
@@ -129,32 +100,43 @@ impl MemTable {
         ts_end: i64,
         now_us: i64,
     ) -> Vec<&InternalRecord> {
-        let start = (start_key.to_vec(), i64::MIN, u64::MIN);
-        let end = (end_key.to_vec(), i64::MAX, u64::MAX);
-        self.map
-            .range(start..=end)
-            .filter(|((_, ts, _), v)| *ts >= ts_start && *ts <= ts_end && v.expire_at >= now_us)
-            .map(|(_, v)| v)
+        self.records
+            .iter()
+            .filter(|r| {
+                r.key.as_slice() >= start_key
+                    && r.key.as_slice() <= end_key
+                    && r.ts >= ts_start
+                    && r.ts <= ts_end
+                    && r.expire_at >= now_us
+            })
             .collect()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.records.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.records.len()
     }
 
     pub fn bytes(&self) -> usize {
         self.bytes
     }
 
+    /// Sort records in-place by (key, ts, seq). Called during freeze.
+    pub fn sort(&mut self) {
+        self.records
+            .sort_by(|a, b| a.key.cmp(&b.key).then(a.ts.cmp(&b.ts)).then(a.seq.cmp(&b.seq)));
+    }
+
+    /// Iterate over records in sorted order (call `sort()` first).
     pub fn iter_sorted(&self) -> impl Iterator<Item = &InternalRecord> {
-        self.map.values()
+        self.records.iter()
     }
 }
 
+#[allow(dead_code)]
 fn increment_prefix(key: &[u8]) -> Vec<u8> {
     let mut bytes = key.to_vec();
     while let Some(last) = bytes.last_mut() {
@@ -218,9 +200,9 @@ impl MemTables {
         if active.is_empty() {
             return false;
         }
-        // Swap the active table out for a fresh one. The old table is
-        // already a BTreeMap, so no conversion is needed — freeze is O(1)
-        // (just the pointer swap) and the write lock is held only briefly.
+        // Sort the active table in-place before freezing, so that
+        // iter_sorted() and SST flush can consume it in order.
+        active.sort();
         let old = std::mem::replace(&mut *active, MemTable::new());
         let mut frozen = self.frozen.write();
         frozen.push(old);
@@ -527,13 +509,12 @@ mod tests {
 
     #[test]
     fn test_memtable_iter_sorted() {
-        // BTreeMap-backed memtable is always sorted — no freeze/conversion
-        // step is required. This test confirms records are returned in
-        // (key, ts, seq) order regardless of insertion order.
+        // Vec-backed memtable: call sort() before iter_sorted().
         let mut mt = MemTable::new();
         mt.insert(make_rec("c", 300, 3));
         mt.insert(make_rec("a", 100, 1));
         mt.insert(make_rec("b", 200, 2));
+        mt.sort();
 
         let keys: Vec<Vec<u8>> = mt.iter_sorted().map(|r| r.key.clone()).collect();
         assert_eq!(keys, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);

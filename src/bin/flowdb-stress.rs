@@ -118,7 +118,7 @@ async fn bench_sequential_writes(
             });
             key_counter += 1;
         }
-        engine.write_batch(&batch).await.unwrap();
+        engine.write_batch(&batch).unwrap();
     }
     start.elapsed()
 }
@@ -155,7 +155,7 @@ async fn bench_concurrent_writes(
                         value: vec![0xCDu8; value_len],
                     });
                 }
-                engine.write_batch(&batch).await.unwrap();
+                engine.write_batch(&batch).unwrap();
             }
         }));
     }
@@ -225,7 +225,7 @@ async fn bench_mixed_rw(
                         expire_at: i64::MAX,
                         value: vec![0xEFu8; value_len],
                     }];
-                    engine.write_batch(&batch).await.unwrap();
+                    engine.write_batch(&batch).unwrap();
                     write_count += 1;
                 } else {
                     let prefix = format!("mix{}_{}", worker_id, i % 10);
@@ -577,7 +577,6 @@ mod tests {
                 expire_at: i64::MAX,
                 value: vec![1],
             }])
-            .await
             .unwrap();
         let prefixes = vec!["prefix_a".to_string()];
         let d = bench_concurrent_reads(engine.clone(), &prefixes, 2, 3).await;

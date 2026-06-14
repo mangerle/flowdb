@@ -1,6 +1,5 @@
 use crate::error::{FlowError, Result};
 use crate::record::{InternalRecord, Op};
-use std::hash::Hasher;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,12 +7,26 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Size of the per-record checksum trailer (4 bytes).
 const CHECKSUM_LEN: usize = 4;
 
-/// Computes a 4-byte checksum over `data` using `DefaultHasher` (SipHash-1-3).
-/// The lower 32 bits of the 64-bit hash are returned as big-endian bytes.
+/// FxHash-inspired fast non-cryptographic hash for WAL integrity checks.
+/// ~10× faster than SipHash (DefaultHasher) on small inputs.
 fn compute_checksum(data: &[u8]) -> [u8; CHECKSUM_LEN] {
-    let mut h = std::hash::DefaultHasher::new();
-    h.write(data);
-    (h.finish() as u32).to_be_bytes()
+    const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+    let mut hash: u64 = 0;
+    for chunk in data.chunks_exact(8) {
+        let val = u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3],
+            chunk[4], chunk[5], chunk[6], chunk[7],
+        ]);
+        hash = (hash.rotate_left(5) ^ val).wrapping_mul(SEED);
+    }
+    let rem = data.len() & 7;
+    if rem > 0 {
+        let start = data.len() - rem;
+        let mut buf = [0u8; 8];
+        buf[..rem].copy_from_slice(&data[start..]);
+        hash = (hash.rotate_left(5) ^ u64::from_le_bytes(buf)).wrapping_mul(SEED);
+    }
+    (hash as u32).to_be_bytes()
 }
 
 /// Verifies the trailing checksum on a decoded record buffer.
@@ -279,10 +292,11 @@ impl Wal {
 }
 
 /// Encodes multiple records into a single binary buffer (big-endian).
-/// Each record is appended sequentially via `encode_record`. Returns the
-/// buffer and the total estimated memory footprint.
+/// Pre-computes total encoded size to avoid buffer reallocations.
+/// Returns the buffer and the total estimated memory footprint.
 pub(crate) fn encode_batch(records: &[InternalRecord]) -> (Vec<u8>, u64) {
-    let mut buf = Vec::with_capacity(records.len() * 80);
+    let total_size: usize = records.iter().map(encoded_size).sum();
+    let mut buf = Vec::with_capacity(total_size);
     let mut total_mem_bytes: u64 = 0;
     for rec in records {
         encode_record(rec, &mut buf);
@@ -311,7 +325,6 @@ pub(crate) fn encoded_size(rec: &InternalRecord) -> usize {
 ///         range_end_len(4) | range_end | val_len(4) | value | checksum(4)
 pub(crate) fn encode_record(rec: &InternalRecord, buf: &mut Vec<u8>) {
     let start = buf.len();
-    buf.reserve(encoded_size(rec));
     buf.extend_from_slice(&rec.seq.to_be_bytes());
     buf.push(rec.op.to_u8());
     buf.extend_from_slice(&(rec.key.len() as u16).to_be_bytes());

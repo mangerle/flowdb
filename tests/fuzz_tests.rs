@@ -101,7 +101,7 @@ async fn fuzz_wal_encode_decode() {
 
         {
             let engine = Engine::open(config.clone()).await.unwrap();
-            engine.write_batch(&records).await.unwrap();
+            engine.write_batch(&records).unwrap();
             engine.shutdown().await.unwrap();
         }
 
@@ -137,7 +137,7 @@ async fn fuzz_sstable_write_read() {
         let records: Vec<Record> = fuzz_records.iter().map(to_record).collect();
 
         let engine = Engine::open(config).await.unwrap();
-        engine.write_batch(&records).await.unwrap();
+        engine.write_batch(&records).unwrap();
         engine.flush().await.unwrap();
 
         for fr in &fuzz_records {
@@ -171,7 +171,7 @@ async fn fuzz_memtable_query() {
         let records: Vec<Record> = fuzz_records.iter().map(to_record).collect();
 
         let engine = Engine::open(config).await.unwrap();
-        engine.write_batch(&records).await.unwrap();
+        engine.write_batch(&records).unwrap();
 
         for fr in &fuzz_records {
             let results = engine.query_by_prefix(&fr.key).await.unwrap();
@@ -222,7 +222,7 @@ async fn fuzz_engine_write_query() {
             if records.is_empty() {
                 continue;
             }
-            engine.write_batch(&records).await.unwrap();
+            engine.write_batch(&records).unwrap();
             all_written.extend(records);
         }
 
@@ -269,13 +269,13 @@ async fn fuzz_manifest_recovery() {
 
         {
             let engine = Engine::open(config.clone()).await.unwrap();
-            engine.write_batch(&records).await.unwrap();
+            engine.write_batch(&records).unwrap();
             engine.flush().await.unwrap();
 
             let fuzz_more = gen_records(&mut u, 10);
             let more_records: Vec<Record> = fuzz_more.iter().map(to_record).collect();
             if !more_records.is_empty() {
-                engine.write_batch(&more_records).await.unwrap();
+                engine.write_batch(&more_records).unwrap();
             }
 
             engine.shutdown().await.unwrap();
@@ -315,7 +315,7 @@ async fn fuzz_block_meta_index_queries() {
                 continue;
             }
             all_keys.extend(fuzz_recs.iter().map(|r| r.key.clone()));
-            engine.write_batch(&records).await.unwrap();
+            engine.write_batch(&records).unwrap();
             engine.flush().await.unwrap();
         }
 

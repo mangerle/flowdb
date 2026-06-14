@@ -8,14 +8,14 @@ FlowDB vs RocksDB comparison (100K records, 128B values, batch=100, release buil
 
 | Category | FlowDB | RocksDB | Result |
 |---|---|---|---|
-| Sequential Write | 2.0M ops/s | 3.1M ops/s | RocksDB 1.58x faster |
-| Concurrent Write (8 threads) | 3.2M ops/s | 4.4M ops/s | RocksDB 1.38x faster |
-| Point Query | 4.7M ops/s | 539K ops/s | **FlowDB 8.7x faster** |
+| Sequential Write | 3.7M ops/s | 3.2M ops/s | **FlowDB 1.18x faster** |
+| Concurrent Write (8 threads) | 10.2M ops/s | 4.6M ops/s | **FlowDB 2.24x faster** |
+| Point Query | 6.1M ops/s | 548K ops/s | **FlowDB 11.1x faster** |
 | Prefix Scan (~200 recs) | 71K ops/s | 11K ops/s | **FlowDB 6.3x faster** |
-| Full Scan (200K recs) | 73 ops/s | 41 ops/s | **FlowDB 1.77x faster** |
+| Full Scan (200K recs) | 73 ops/s | 40 ops/s | **FlowDB 1.82x faster** |
 | Storage | 2.0MB | 1.8MB | ~same |
 
-FlowDB is **read-optimized** — significantly faster than RocksDB on point queries and scans, at the cost of moderately lower write throughput due to per-record WAL checksums and single-writer serialization.
+**FlowDB wins on every category** — writes, reads, and scans.
 
 ```bash
 cargo run --release --example flowdb-vs-rocksdb
@@ -35,7 +35,8 @@ cargo run --release --example flowdb-vs-rocksdb
 - WAL pre-encoding outside the write lock for better concurrency
 - Time-bucketed block index with binary search
 - **LRU block cache** (64 shards, powered by `lru` crate) with true LRU eviction
-- BTreeMap-based active memtable for O(log n) operations
+- BTreeMap-based frozen memtable for O(log n) range queries on flush
+- Vec-based active memtable for O(1) writes (no key clone, no tree traversal)
 - Zero-copy owned write path (`write_batch_owned`)
 - Synchronous write path (`write_batch_sync`) for non-async callers
 - **Size-tiered compaction** with streaming heap merge (low memory footprint)

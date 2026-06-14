@@ -46,6 +46,7 @@ impl WriteWorker {
         wal_buf: &[u8],
         mem_bytes: u64,
         num_records: u64,
+        batch_max_seq: u64,
         sync_mode: SyncMode,
     ) -> Result<()> {
         // Backpressure: if frozen memtables have piled up beyond the limit,
@@ -57,7 +58,6 @@ impl WriteWorker {
 
         let bytes_written = mem_bytes;
 
-        let batch_max_seq = records.iter().map(|r| r.seq).max().unwrap_or(0);
         self.wal.write_encoded(wal_buf, batch_max_seq)?;
 
         {
@@ -101,7 +101,7 @@ impl WriteWorker {
         let mut all_records: Vec<InternalRecord> = frozen.iter_sorted().cloned().collect();
         let now_us = now_micros();
         all_records.retain(|r| r.expire_at > now_us);
-        all_records.sort_by(|a, b| a.key.cmp(&b.key).then(a.ts.cmp(&b.ts)));
+        // Records are already sorted by (key, ts, seq) from freeze().
 
         if all_records.is_empty() {
             self.stats.set_frozen_count(self.memtables.frozen_count());
