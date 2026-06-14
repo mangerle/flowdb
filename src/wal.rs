@@ -259,11 +259,11 @@ impl Wal {
         let to_delete: Vec<PathBuf> = self
             .segments
             .iter()
-            .filter(|s| s.max_seq > 0 && s.max_seq < seq)
+            .filter(|s| s.max_seq > 0 && s.max_seq <= seq)
             .map(|s| s.path.clone())
             .collect();
 
-        self.segments.retain(|s| s.max_seq == 0 || s.max_seq >= seq);
+        self.segments.retain(|s| s.max_seq == 0 || s.max_seq > seq);
 
         if self.segments.is_empty() {
             let id = self.next_segment_id;

@@ -8,15 +8,17 @@ FlowDB vs RocksDB comparison (100K records, 128B values, batch=100, release buil
 
 | Category | FlowDB | RocksDB | Result |
 |---|---|---|---|
-| Sequential Write | 5.7M ops/s | 3.0M ops/s | **FlowDB 1.92x faster** |
-| Concurrent Write (8 threads) | 6.7M ops/s | 4.1M ops/s | **FlowDB 1.63x faster** |
-| Point Query | 6.6M ops/s | 524K ops/s | **FlowDB 12.7x faster** |
-| Prefix Scan (~200 recs) | 71K ops/s | 10.7K ops/s | **FlowDB 6.6x faster** |
-| Full Scan (200K recs) | 65 ops/s | 39 ops/s | **FlowDB 1.67x faster** |
-| Storage | 1.9MB | 1.8MB | ~same |
+| Sequential Write | 2.0M ops/s | 3.1M ops/s | RocksDB 1.58x faster |
+| Concurrent Write (8 threads) | 3.2M ops/s | 4.4M ops/s | RocksDB 1.38x faster |
+| Point Query | 4.7M ops/s | 539K ops/s | **FlowDB 8.7x faster** |
+| Prefix Scan (~200 recs) | 71K ops/s | 11K ops/s | **FlowDB 6.3x faster** |
+| Full Scan (200K recs) | 73 ops/s | 41 ops/s | **FlowDB 1.77x faster** |
+| Storage | 2.0MB | 1.8MB | ~same |
+
+FlowDB is **read-optimized** — significantly faster than RocksDB on point queries and scans, at the cost of moderately lower write throughput due to per-record WAL checksums and single-writer serialization.
 
 ```bash
-cargo run --release --bin flowdb-stress
+cargo run --release --example flowdb-vs-rocksdb
 ```
 
 ## Features
