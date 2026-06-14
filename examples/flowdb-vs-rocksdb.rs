@@ -358,7 +358,7 @@ async fn bench_flowdb_seq_write(engine: &Engine, n: u64, batch: usize) -> BenchR
                 break;
             }
             records.push(Record {
-                key: make_key(key_counter),
+                key: make_key(key_counter).into_bytes(),
                 ts: key_counter as i64,
                 expire_at: i64::MAX,
                 value: val.clone(),
@@ -405,7 +405,7 @@ async fn bench_flowdb_conc_write(
                 for j in 0..actual {
                     let idx = batch_start + j as u64;
                     records.push(Record {
-                        key: format!("cw{}_{}", tid, idx),
+                        key: format!("cw{}_{}", tid, idx).into_bytes(),
                         ts: idx as i64,
                         expire_at: i64::MAX,
                         value: val.clone(),

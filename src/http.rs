@@ -53,7 +53,7 @@ impl WriteRecord {
             vec![]
         };
         Ok(Record {
-            key: self.key.clone(),
+            key: self.key.clone().into_bytes(),
             ts: self.ts,
             expire_at: i64::MAX,
             value,
@@ -107,7 +107,8 @@ pub struct QueryResponse {
 
 #[derive(Serialize)]
 struct QueryRecord {
-    key: String,
+    #[serde(with = "crate::record::key_serde")]
+    key: Vec<u8>,
     ts: i64,
     expire_at: i64,
     value: String,
@@ -686,7 +687,7 @@ mod tests {
             value: None,
         };
         let rec = wr.to_record().unwrap();
-        assert_eq!(rec.key, "test");
+        assert_eq!(rec.key, b"test");
         assert_eq!(rec.value, b"hello");
     }
 

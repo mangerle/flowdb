@@ -791,7 +791,7 @@ fn bench_engine(c: &mut Criterion) {
                         let engine = rt.block_on(Engine::open(config)).unwrap();
                         let records: Vec<Record> = (0..batch_size)
                             .map(|i| Record {
-                                key: format!("bench_key_{:06}", i),
+                                key: format!("bench_key_{:06}", i).into_bytes(),
                                 ts: i as i64 * 100,
                                 expire_at: i64::MAX,
                                 value: vec![42u8; 32],
@@ -812,7 +812,7 @@ fn bench_engine(c: &mut Criterion) {
 
     let records_for_query: Vec<Record> = (0..1000)
         .map(|i| Record {
-            key: format!("query_key_{:06}", i),
+            key: format!("query_key_{:06}", i).into_bytes(),
             ts: i as i64 * 100,
             expire_at: i64::MAX,
             value: vec![42u8; 32],

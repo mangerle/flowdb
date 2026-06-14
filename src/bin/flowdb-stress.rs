@@ -98,7 +98,7 @@ async fn bench_sequential_writes(
                 break;
             }
             batch.push(Record {
-                key: format!("seq_{:08}", key_counter),
+                key: format!("seq_{:08}", key_counter).into_bytes(),
                 ts: key_counter as i64 * 100,
                 expire_at: i64::MAX,
                 value: vec![0xABu8; value_len],
@@ -136,7 +136,7 @@ async fn bench_concurrent_writes(
                 for j in 0..actual {
                     let idx = batch_start + j as u64;
                     batch.push(Record {
-                        key: format!("cw{}_{}", worker_id, idx),
+                        key: format!("cw{}_{}", worker_id, idx).into_bytes(),
                         ts: idx as i64 * 100,
                         expire_at: i64::MAX,
                         value: vec![0xCDu8; value_len],
@@ -207,7 +207,7 @@ async fn bench_mixed_rw(
             for i in 0..ops_per_worker {
                 if i < writes_per_worker {
                     let batch = vec![Record {
-                        key: format!("mix{}_{}", worker_id, i),
+                        key: format!("mix{}_{}", worker_id, i).into_bytes(),
                         ts: i as i64 * 100,
                         expire_at: i64::MAX,
                         value: vec![0xEFu8; value_len],

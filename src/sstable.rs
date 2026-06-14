@@ -236,14 +236,8 @@ impl SstWriter {
             let min_expire = chunk.iter().map(|r| r.expire_at).min().unwrap_or(0);
             let max_expire = chunk.iter().map(|r| r.expire_at).max().unwrap_or(0);
 
-            let first_key = chunk
-                .first()
-                .map(|r| unsafe { String::from_utf8_unchecked(r.key.clone()) })
-                .unwrap_or_default();
-            let last_key = chunk
-                .last()
-                .map(|r| unsafe { String::from_utf8_unchecked(r.key.clone()) })
-                .unwrap_or_default();
+            let first_key = chunk.first().map(|r| r.key.clone()).unwrap_or_default();
+            let last_key = chunk.last().map(|r| r.key.clone()).unwrap_or_default();
 
             let header = BlockHeader {
                 num_records: chunk.len() as u32,
@@ -446,7 +440,7 @@ mod tests {
             .map(|i| {
                 InternalRecord::from_record(
                     &Record {
-                        key: format!("key_{:04}", i),
+                        key: format!("key_{:04}", i).into_bytes(),
                         ts: (i * 100) as i64,
                         expire_at: i64::MAX,
                         value: vec![1, 2, 3, 4],
@@ -505,13 +499,13 @@ mod tests {
         let (_, block_infos, _) = SstWriter::write(&path, &records, 10, 3, 10, false).unwrap();
         assert_eq!(block_infos.len(), 2);
 
-        assert_eq!(block_infos[0].min_key, "key_0000");
-        assert_eq!(block_infos[0].max_key, "key_0009");
+        assert_eq!(block_infos[0].min_key, b"key_0000");
+        assert_eq!(block_infos[0].max_key, b"key_0009");
         assert_eq!(block_infos[0].min_ts, 0);
         assert_eq!(block_infos[0].max_ts, 900);
 
-        assert_eq!(block_infos[1].min_key, "key_0010");
-        assert_eq!(block_infos[1].max_key, "key_0019");
+        assert_eq!(block_infos[1].min_key, b"key_0010");
+        assert_eq!(block_infos[1].max_key, b"key_0019");
     }
 
     #[test]
@@ -521,7 +515,7 @@ mod tests {
             .map(|i| {
                 InternalRecord::from_record(
                     &Record {
-                        key: "same_key".to_string(),
+                        key: b"same_key".to_vec(),
                         ts: i,
                         expire_at: i64::MAX,
                         value: vec![0u8; 100],

@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, HashMap};
 pub(crate) struct BlockMeta {
     pub sst_id: u32,
     pub block_idx: u32,
-    pub min_key: String,
-    pub max_key: String,
+    pub min_key: Vec<u8>,
+    pub max_key: Vec<u8>,
     pub min_ts: i64,
     pub max_ts: i64,
     pub max_expire: i64,
@@ -29,11 +29,11 @@ impl BlockMeta {
 
     fn overlaps_key_prefix(&self, prefix: &[u8]) -> bool {
         let prefix_end = increment_prefix(prefix);
-        self.min_key.as_bytes() < prefix_end.as_slice() && self.max_key.as_bytes() >= prefix
+        self.min_key.as_slice() < prefix_end.as_slice() && self.max_key.as_slice() >= prefix
     }
 
     fn overlaps_key_range(&self, start: &[u8], end: &[u8]) -> bool {
-        self.min_key.as_bytes() <= end && self.max_key.as_bytes() >= start
+        self.min_key.as_slice() <= end && self.max_key.as_slice() >= start
     }
 
     fn overlaps_time(&self, ts_start: i64, ts_end: i64) -> bool {
@@ -67,7 +67,7 @@ impl BlockMetaIndex {
     pub fn add_sst(&mut self, sst_id: u32, blocks: &[BlockInfo]) {
         for bi in blocks {
             let meta = BlockMeta::from_block_info(sst_id, bi);
-            let key = meta.min_key.as_bytes().to_vec();
+            let key = meta.min_key.clone();
             self.by_key.entry(key).or_default().push(meta.clone());
 
             let bucket = meta.min_ts / self.time_bucket_us;
@@ -83,6 +83,14 @@ impl BlockMetaIndex {
 
     pub fn set_bloom(&mut self, sst_id: u32, bloom: BloomFilter) {
         self.blooms.insert(sst_id, bloom);
+    }
+
+    /// Drop the cached bloom for `sst_id`. Subsequent point lookups will
+    /// treat the SST as "always potentially matching" (i.e. fall back to a
+    /// real block read). Used when a persisted bloom is known to be stale
+    /// and cannot be rebuilt immediately.
+    pub fn remove_bloom(&mut self, sst_id: u32) {
+        self.blooms.remove(&sst_id);
     }
 
     pub fn remove_sst(&mut self, sst_id: u32) {
@@ -144,17 +152,17 @@ impl BlockMetaIndex {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let b = &blocks[mid];
-            if b.max_key.as_bytes() < key {
+            if b.max_key.as_slice() < key {
                 lo = mid + 1;
-            } else if b.min_key.as_bytes() > key {
+            } else if b.min_key.as_slice() > key {
                 hi = mid;
             } else {
                 return Some(b);
             }
         }
         if lo < blocks.len()
-            && blocks[lo].min_key.as_bytes() <= key
-            && blocks[lo].max_key.as_bytes() >= key
+            && blocks[lo].min_key.as_slice() <= key
+            && blocks[lo].max_key.as_slice() >= key
         {
             return Some(&blocks[lo]);
         }
@@ -270,8 +278,8 @@ mod tests {
     ) -> BlockInfo {
         BlockInfo {
             block_idx: idx,
-            min_key: min_key.to_string(),
-            max_key: max_key.to_string(),
+            min_key: min_key.as_bytes().to_vec(),
+            max_key: max_key.as_bytes().to_vec(),
             min_ts,
             max_ts,
             min_expire: i64::MAX,

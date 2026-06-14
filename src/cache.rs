@@ -95,7 +95,7 @@ mod tests {
     fn make_rec(key: &str) -> InternalRecord {
         InternalRecord::from_record(
             &Record {
-                key: key.to_string(),
+                key: key.as_bytes().to_vec(),
                 ts: 0,
                 expire_at: i64::MAX,
                 value: vec![1],

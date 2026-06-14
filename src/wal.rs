@@ -419,7 +419,7 @@ mod tests {
     fn make_record(key: &str, ts: i64, seq: u64) -> InternalRecord {
         InternalRecord::from_record(
             &Record {
-                key: key.to_string(),
+                key: key.as_bytes().to_vec(),
                 ts,
                 expire_at: i64::MAX,
                 value: vec![1, 2, 3],
@@ -547,7 +547,7 @@ mod tests {
         for i in 0..20 {
             let rec = InternalRecord::from_record(
                 &Record {
-                    key: format!("key_{:04}", i),
+                    key: format!("key_{:04}", i).into_bytes(),
                     ts: i as i64,
                     expire_at: i64::MAX,
                     value: big_val.clone(),
@@ -576,7 +576,7 @@ mod tests {
             let seq = (i + 1) as u64;
             let rec = InternalRecord::from_record(
                 &Record {
-                    key: format!("old_{:04}", i),
+                    key: format!("old_{:04}", i).into_bytes(),
                     ts: i as i64,
                     expire_at: i64::MAX,
                     value: big_val.clone(),
@@ -593,7 +593,7 @@ mod tests {
             let seq = (100 + i) as u64;
             let rec = InternalRecord::from_record(
                 &Record {
-                    key: format!("new_{:04}", i),
+                    key: format!("new_{:04}", i).into_bytes(),
                     ts: (100 + i) as i64,
                     expire_at: i64::MAX,
                     value: big_val.clone(),
@@ -610,7 +610,7 @@ mod tests {
         let replayed = wal.replay_from(0).unwrap();
         let keys: Vec<String> = replayed
             .iter()
-            .map(|r| unsafe { String::from_utf8_unchecked(r.key.clone()) })
+            .map(|r| String::from_utf8_lossy(&r.key).into_owned())
             .collect();
 
         assert!(
@@ -636,7 +636,7 @@ mod tests {
             let seq = (i + 1) as u64;
             let rec = InternalRecord::from_record(
                 &Record {
-                    key: format!("key_{:04}", i),
+                    key: format!("key_{:04}", i).into_bytes(),
                     ts: i as i64,
                     expire_at: i64::MAX,
                     value: big_val.clone(),

@@ -50,7 +50,7 @@ impl<'a> Arbitrary<'a> for FuzzRecord {
 
 fn to_record(fr: &FuzzRecord) -> Record {
     Record {
-        key: fr.key.clone(),
+        key: fr.key.clone().into_bytes(),
         ts: fr.ts,
         expire_at: i64::MAX,
         value: fr.value.clone(),
@@ -235,7 +235,7 @@ fn fuzz_udp_frame_encode_decode() {
         }
 
         let rec = flowdb::Record {
-            key: key.clone(),
+            key: key.clone().into_bytes(),
             ts,
             expire_at: if has_ttl {
                 ts + (ttl.unwrap_or(3600) as i64 * 1_000_000)
@@ -249,7 +249,7 @@ fn fuzz_udp_frame_encode_decode() {
         match flowdb::udp::decode_frame(&encoded) {
             Ok(decoded) => {
                 assert_eq!(decoded.len(), 1);
-                assert_eq!(decoded[0].key, key);
+                assert_eq!(decoded[0].key, key.into_bytes());
                 assert_eq!(decoded[0].ts, ts);
                 assert_eq!(decoded[0].value, value);
             }
@@ -290,10 +290,11 @@ async fn fuzz_engine_write_query() {
         }
 
         if let Some(key) = all_written.first().map(|r| r.key.clone()) {
-            let results = engine.query_by_prefix(&key).await.unwrap();
+            let key_str = String::from_utf8_lossy(&key);
+            let results = engine.query_by_prefix(&key_str).await.unwrap();
             assert!(
                 !results.is_empty(),
-                "seed={}: prefix query empty for key={}",
+                "seed={}: prefix query empty for key={:?}",
                 seed,
                 key
             );
@@ -446,7 +447,7 @@ fn fuzz_udp_batch_frame() {
             };
 
             records.push(flowdb::Record {
-                key,
+                key: key.into_bytes(),
                 ts,
                 expire_at: i64::MAX,
                 value,

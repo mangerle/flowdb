@@ -61,7 +61,7 @@ fn read_record(data: &[u8], mut pos: usize) -> Option<(Record, usize)> {
     if pos + key_len as usize > data.len() {
         return None;
     }
-    let key = String::from_utf8_lossy(&data[pos..pos + key_len as usize]).into_owned();
+    let key = data[pos..pos + key_len as usize].to_vec();
     pos += key_len as usize;
 
     let (ts, p) = read_i64(data, pos)?;
@@ -138,7 +138,7 @@ pub fn encode_frame(records: &[Record]) -> Vec<u8> {
     buf.extend_from_slice(&(records.len() as u16).to_be_bytes());
 
     for rec in records {
-        let key_bytes = rec.key.as_bytes();
+        let key_bytes = &rec.key;
         buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
         buf.extend_from_slice(key_bytes);
         buf.extend_from_slice(&rec.ts.to_be_bytes());
@@ -208,7 +208,7 @@ mod tests {
         let encoded = encode_frame(std::slice::from_ref(&rec));
         let decoded = decode_frame(&encoded).unwrap();
         assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].key, "test-key");
+        assert_eq!(decoded[0].key, b"test-key");
         assert_eq!(decoded[0].ts, 1234567890);
         assert_eq!(decoded[0].value, b"hello");
         assert!(decoded[0].expire_at < i64::MAX);
@@ -246,8 +246,8 @@ mod tests {
         let encoded = encode_frame(&recs);
         let decoded = decode_frame(&encoded).unwrap();
         assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[0].key, "a");
-        assert_eq!(decoded[1].key, "b");
+        assert_eq!(decoded[0].key, b"a");
+        assert_eq!(decoded[1].key, b"b");
     }
 
     #[test]

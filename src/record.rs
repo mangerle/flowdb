@@ -2,12 +2,60 @@ use serde::{Deserialize, Serialize};
 use std::ops::Bound;
 use std::path::PathBuf;
 
+/// Serde adapter for `Record.key` (`Vec<u8>`).
+///
+/// Serialises as a UTF-8 **string** for HTTP / JSON API compatibility (lossy
+/// replacement bytes `U+FFFD` for non-UTF-8 keys). On deserialise, accepts
+/// either a JSON string (converted to its UTF-8 bytes) or a JSON array of
+/// bytes (preserved as-is). This keeps old clients that send `"key": "abc"`
+/// working while letting future binary-key clients send raw bytes.
+pub(crate) mod key_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(key: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        let cow = String::from_utf8_lossy(key);
+        s.serialize_str(&cow)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum KeyRepr {
+            Str(String),
+            Bytes(Vec<u8>),
+        }
+        match KeyRepr::deserialize(d)? {
+            KeyRepr::Str(s) => Ok(s.into_bytes()),
+            KeyRepr::Bytes(b) => Ok(b),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
-    pub key: String,
+    #[serde(with = "key_serde")]
+    pub key: Vec<u8>,
     pub ts: i64,
     pub expire_at: i64,
     pub value: Vec<u8>,
+}
+
+impl Record {
+    /// Convenience constructor mirroring the old `String`-keyed API.
+    pub fn new(key: impl Into<Vec<u8>>, ts: i64, value: Vec<u8>) -> Self {
+        Self {
+            key: key.into(),
+            ts,
+            expire_at: i64::MAX,
+            value,
+        }
+    }
+
+    /// View the key as a UTF-8 string slice when callers know keys are text.
+    /// Returns the raw bytes as a lossy string for non-UTF-8 keys.
+    pub fn key_str(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.key)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -48,7 +96,7 @@ impl InternalRecord {
         Self {
             seq,
             op: Op::Put,
-            key: rec.key.as_bytes().to_vec(),
+            key: rec.key.clone(),
             ts: rec.ts,
             expire_at: rec.expire_at,
             value: rec.value.clone(),
@@ -56,11 +104,11 @@ impl InternalRecord {
         }
     }
 
-    pub fn delete(key: String, ts: i64, seq: u64) -> Self {
+    pub fn delete(key: Vec<u8>, ts: i64, seq: u64) -> Self {
         Self {
             seq,
             op: Op::Delete,
-            key: key.into_bytes(),
+            key,
             ts,
             expire_at: i64::MAX,
             value: vec![],
@@ -68,21 +116,21 @@ impl InternalRecord {
         }
     }
 
-    pub fn delete_range(start_key: String, end_key: String, seq: u64) -> Self {
+    pub fn delete_range(start_key: Vec<u8>, end_key: Vec<u8>, seq: u64) -> Self {
         Self {
             seq,
             op: Op::DeleteRange,
-            key: start_key.into_bytes(),
+            key: start_key,
             ts: 0,
             expire_at: i64::MAX,
             value: vec![],
-            range_end: Some(end_key.into_bytes()),
+            range_end: Some(end_key),
         }
     }
 
     pub fn to_record(&self) -> Record {
         Record {
-            key: unsafe { String::from_utf8_unchecked(self.key.clone()) },
+            key: self.key.clone(),
             ts: self.ts,
             expire_at: self.expire_at,
             value: self.value.clone(),
@@ -91,7 +139,7 @@ impl InternalRecord {
 
     pub fn into_record_owned(self) -> Record {
         Record {
-            key: unsafe { String::from_utf8_unchecked(self.key) },
+            key: self.key,
             ts: self.ts,
             expire_at: self.expire_at,
             value: self.value,
@@ -355,7 +403,7 @@ mod tests {
     #[test]
     fn test_internal_record_estimated_size() {
         let rec = Record {
-            key: "hello".to_string(),
+            key: b"hello".to_vec(),
             ts: 100,
             expire_at: i64::MAX,
             value: vec![1, 2, 3, 4, 5],
@@ -368,7 +416,7 @@ mod tests {
     #[test]
     fn test_internal_record_estimated_size_empty() {
         let rec = Record {
-            key: String::new(),
+            key: Vec::new(),
             ts: 0,
             expire_at: 0,
             value: Vec::new(),
@@ -431,7 +479,7 @@ mod tests {
     #[test]
     fn test_internal_record_from_to_record_roundtrip() {
         let rec = Record {
-            key: "test".to_string(),
+            key: b"test".to_vec(),
             ts: 42,
             expire_at: 100,
             value: vec![7, 8, 9],

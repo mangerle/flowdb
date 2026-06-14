@@ -3,7 +3,7 @@ use crate::cache::{BlockCache, CacheKey};
 use crate::compaction::CompactionRunner;
 use crate::error::{FlowError, Result};
 use crate::gc::GcRunner;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, ManifestEntry};
 use crate::memtable::MemTables;
 use crate::record::{Config, InternalRecord, KeyFilter, Op, Query, ReadOptions, Record, ScanRange};
 use crate::sstable::SstReader;
@@ -111,7 +111,7 @@ impl Engine {
 
         let stats = Arc::new(StatsCounters::new());
         let mut wal = Wal::open(&data_dir.join("WAL"), config.wal_segment_size_mb)?;
-        let manifest = Manifest::open(data_dir)?;
+        let mut manifest = Manifest::open(data_dir)?;
 
         let mut index = BlockMetaIndex::new(config.time_bucket_secs);
         let state = manifest.state().clone();
@@ -126,7 +126,60 @@ impl Engine {
             }
         }
 
-        let last_flushed_seq = state.last_flushed_seq;
+        // Upgraded bloom hasher migration: any persisted bloom whose
+        // `hash_version` is not current was built with a different hash
+        // function. Querying it would yield meaningless results, so we
+        // rebuild it from the SST file's actual records. This is a one-time
+        // cost paid on the first startup after a hasher upgrade; subsequent
+        // startups skip it entirely (version matches).
+        let stale_ssts: Vec<u32> = state
+            .active_sst_ids
+            .iter()
+            .filter(|&&id| match state.sstables.get(&id) {
+                Some(info) => match info.bloom {
+                    Some(ref b) => b.hash_version() != crate::bloom::CURRENT_HASH_VERSION,
+                    None => false,
+                },
+                None => false,
+            })
+            .copied()
+            .collect();
+
+        if !stale_ssts.is_empty() {
+            let rebuild_start = std::time::Instant::now();
+            tracing::warn!(
+                "Bloom hasher upgrade detected: rebuilding {} stale filter(s) ({} total SSTs)",
+                stale_ssts.len(),
+                state.active_sst_ids.len()
+            );
+            for sst_id in &stale_ssts {
+                if let Err(e) = Engine::rebuild_bloom_for_sst(
+                    &config,
+                    &mut manifest,
+                    &mut index,
+                    *sst_id,
+                    config.bloom_bits_per_key,
+                ) {
+                    tracing::error!(
+                        "Failed to rebuild bloom for SST {}: {} — falling back to no filter (correctness preserved, point queries may be slower)",
+                        sst_id,
+                        e
+                    );
+                    // Remove the stale bloom so queries skip the meaningless
+                    // bits entirely (BlockMetaIndex treats missing bloom as
+                    // "always match"). This preserves correctness at the
+                    // cost of slower point lookups until compaction.
+                    index.remove_bloom(*sst_id);
+                }
+            }
+            tracing::info!(
+                "Bloom rebuild complete: {} sst(s) in {:?}",
+                stale_ssts.len(),
+                rebuild_start.elapsed()
+            );
+        }
+
+        let last_flushed_seq = manifest.state().last_flushed_seq;
         let wal_records = wal.replay_from(last_flushed_seq)?;
 
         let memtables = Arc::new(MemTables::new(
@@ -218,7 +271,7 @@ impl Engine {
                 InternalRecord {
                     seq: base + i as u64,
                     op: Op::Put,
-                    key: rec.key.into_bytes(),
+                    key: rec.key,
                     ts: rec.ts,
                     expire_at,
                     value: rec.value,
@@ -345,17 +398,18 @@ impl Engine {
             return None;
         }
 
+        let key_bytes = key.as_bytes();
         let idx = self.index.read();
-        if let Some((sst_id, block_idx)) = idx.single_sst_point(key.as_bytes(), now_us) {
+        if let Some((sst_id, block_idx)) = idx.single_sst_point(key_bytes, now_us) {
             drop(idx);
-            if let Some(rec) = self.block_search(key, ts, now_us, sst_id, block_idx) {
+            if let Some(rec) = self.block_search(key_bytes, ts, now_us, sst_id, block_idx) {
                 return Some(rec);
             }
             return None;
         }
 
-        let found = idx.query_point_inline(key.as_bytes(), now_us, |meta| {
-            self.block_search(key, ts, now_us, meta.sst_id, meta.block_idx)
+        let found = idx.query_point_inline(key_bytes, now_us, |meta| {
+            self.block_search(key_bytes, ts, now_us, meta.sst_id, meta.block_idx)
         });
         drop(idx);
         found
@@ -363,7 +417,7 @@ impl Engine {
 
     fn block_search(
         &self,
-        key: &str,
+        key: &[u8],
         ts: i64,
         now_us: i64,
         sst_id: u32,
@@ -390,14 +444,14 @@ impl Engine {
 
     fn find_in_records(
         records: &[InternalRecord],
-        key: &str,
+        key: &[u8],
         ts: i64,
         now_us: i64,
     ) -> Option<Record> {
         let lo = match records.binary_search_by(|r| {
             r.key
                 .as_slice()
-                .cmp(key.as_bytes())
+                .cmp(key)
                 .then_with(|| r.ts.cmp(&ts))
         }) {
             Ok(idx) => idx,
@@ -406,7 +460,7 @@ impl Engine {
         let rec = &records[lo];
         if rec.expire_at > now_us && rec.op != Op::Delete {
             return Some(Record {
-                key: key.to_string(),
+                key: key.to_vec(),
                 ts: rec.ts,
                 expire_at: rec.expire_at,
                 value: rec.value.clone(),
@@ -427,7 +481,7 @@ impl Engine {
         let records: Vec<InternalRecord> = keys_ts
             .iter()
             .enumerate()
-            .map(|(i, (key, ts))| InternalRecord::delete(key.clone(), *ts, base + i as u64))
+            .map(|(i, (key, ts))| InternalRecord::delete(key.clone().into_bytes(), *ts, base + i as u64))
             .collect();
 
         self.do_write(records)
@@ -437,7 +491,11 @@ impl Engine {
         let seq = self
             .seq_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let record = InternalRecord::delete_range(start_key.to_string(), end_key.to_string(), seq);
+        let record = InternalRecord::delete_range(
+            start_key.as_bytes().to_vec(),
+            end_key.as_bytes().to_vec(),
+            seq,
+        );
         self.do_write(vec![record])
     }
 
@@ -517,6 +575,74 @@ impl Engine {
             return Err(FlowError::Other(format!("sst {} not found", sst_id)));
         }
         Ok(Arc::new(SstReader::open(&path, sst_id, 0)?))
+    }
+
+    /// Rebuild the persisted bloom filter for `sst_id` using the current
+    /// hasher. Scans every block in the SST, collects unique keys, builds a
+    /// fresh `BloomFilter`, persists it via a `ManifestEntry::UpdateBloom`,
+    /// and refreshes the in-memory index. Called from `Engine::open` for any
+    /// SST whose persisted bloom was built with a legacy hash function.
+    ///
+    /// This is a one-time migration cost; subsequent startups find the
+    /// persisted version matches `CURRENT_HASH_VERSION` and skip the rebuild.
+    fn rebuild_bloom_for_sst(
+        config: &Config,
+        manifest: &mut Manifest,
+        index: &mut BlockMetaIndex,
+        sst_id: u32,
+        bits_per_key: usize,
+    ) -> Result<()> {
+        let path = config
+            .data_dir
+            .join("SST")
+            .join(format!("{:09}.sst", sst_id));
+        if !path.exists() {
+            return Err(FlowError::Other(format!(
+                "rebuild_bloom: sst {} file missing",
+                sst_id
+            )));
+        }
+
+        // Open the reader with `block_count=0` — SstReader::open walks the
+        // file to discover block boundaries, so 0 just means "no hint".
+        let reader = SstReader::open(&path, sst_id, 0)?;
+        let block_count = reader.block_count();
+
+        // Collect unique keys in insertion order. We do NOT need values.
+        // Records within a block are sorted, and blocks themselves are
+        // sorted by min_key (write path sorts before flush), so we only
+        // need to compare against the last-emitted key for deduplication.
+        let mut unique_keys: Vec<Vec<u8>> = Vec::new();
+        let mut last_key: Option<Vec<u8>> = None;
+        for blk_idx in 0..block_count {
+            let block = match reader.read_block(blk_idx, None) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(FlowError::Other(format!(
+                        "rebuild_bloom: failed to read block {} of sst {}: {}",
+                        blk_idx, sst_id, e
+                    )));
+                }
+            };
+            for rec in &block.records {
+                if last_key.as_deref() != Some(rec.key.as_slice()) {
+                    unique_keys.push(rec.key.clone());
+                    last_key = Some(rec.key.clone());
+                }
+            }
+        }
+
+        let new_bloom = crate::bloom::BloomFilter::from_keys_with_bits(&unique_keys, bits_per_key);
+        debug_assert_eq!(new_bloom.hash_version(), crate::bloom::CURRENT_HASH_VERSION);
+
+        // Persist the rebuilt bloom so subsequent startups skip the rebuild.
+        manifest.append(&ManifestEntry::UpdateBloom {
+            sst_id,
+            bloom: new_bloom.clone(),
+        })?;
+        // Refresh the in-memory index so point queries immediately benefit.
+        index.set_bloom(sst_id, new_bloom);
+        Ok(())
     }
 
     pub async fn flush(&self) -> Result<()> {
@@ -1007,7 +1133,7 @@ mod tests {
 
     fn make_record(key: &str, ts: i64) -> Record {
         Record {
-            key: key.to_string(),
+            key: key.as_bytes().to_vec(),
             ts,
             expire_at: i64::MAX,
             value: vec![1, 2, 3],
@@ -1031,7 +1157,7 @@ mod tests {
 
         let results = engine.query_by_prefix("key1").await.unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].key, "key1");
+        assert_eq!(results[0].key, b"key1");
 
         engine.shutdown().await.unwrap();
     }
@@ -1174,7 +1300,7 @@ mod tests {
             let engine = Engine::open(config).await.unwrap();
             let results = engine.query_by_prefix("a").await.unwrap();
             assert_eq!(results.len(), 1);
-            assert_eq!(results[0].key, "a");
+            assert_eq!(results[0].key, b"a");
 
             let results = engine.query_by_prefix("b").await.unwrap();
             assert_eq!(results.len(), 1);
@@ -1221,7 +1347,7 @@ mod tests {
         for batch in 0..10u64 {
             let records: Vec<Record> = (0..5)
                 .map(|i| Record {
-                    key: format!("compact_{}-{}", batch, i),
+                    key: format!("compact_{}-{}", batch, i).into_bytes(),
                     ts: (batch * 100 + i) as i64,
                     expire_at: i64::MAX,
                     value: vec![1, 2, 3],
@@ -1253,7 +1379,7 @@ mod tests {
 
         let records: Vec<Record> = (0..10)
             .map(|i| Record {
-                key: format!("gc_key_{}", i),
+                key: format!("gc_key_{}", i).into_bytes(),
                 ts: now_us,
                 expire_at: i64::MAX,
                 value: vec![1, 2, 3],
@@ -1297,8 +1423,8 @@ mod tests {
 
         let results = engine.query_by_key_range("a", "d").await.unwrap();
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].key, "a");
-        assert_eq!(results[1].key, "d");
+        assert_eq!(results[0].key, b"a");
+        assert_eq!(results[1].key, b"d");
 
         engine.shutdown().await.unwrap();
     }
@@ -1324,7 +1450,7 @@ mod tests {
 
         let results = engine.query_by_prefix("s").await.unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].key, "s3");
+        assert_eq!(results[0].key, b"s3");
 
         engine.shutdown().await.unwrap();
     }
@@ -1338,7 +1464,7 @@ mod tests {
         for batch in 0..6u64 {
             let records: Vec<Record> = (0..5)
                 .map(|i| Record {
-                    key: format!("st_{}-{}", batch, i),
+                    key: format!("st_{}-{}", batch, i).into_bytes(),
                     ts: (batch * 100 + i) as i64,
                     expire_at: i64::MAX,
                     value: vec![1, 2, 3],
@@ -1378,7 +1504,7 @@ mod tests {
 
         let x_results = engine.query_by_prefix("x-").await.unwrap();
         assert_eq!(x_results.len(), 1);
-        assert_eq!(x_results[0].key, "x-c");
+        assert_eq!(x_results[0].key, b"x-c");
 
         let y_results = engine.query_by_prefix("y-").await.unwrap();
         assert_eq!(y_results.len(), 2);
@@ -1464,9 +1590,9 @@ mod tests {
             .collect();
         assert_eq!(records.len(), 3);
         // Should be sorted by key, then ts
-        assert_eq!(records[0].key, "a");
-        assert_eq!(records[1].key, "b");
-        assert_eq!(records[2].key, "c");
+        assert_eq!(records[0].key, b"a");
+        assert_eq!(records[1].key, b"b");
+        assert_eq!(records[2].key, b"c");
 
         engine.shutdown().await.unwrap();
     }
@@ -1601,8 +1727,8 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].key, "a");
-        assert_eq!(records[1].key, "d");
+        assert_eq!(records[0].key, b"a");
+        assert_eq!(records[1].key, b"d");
 
         engine.shutdown().await.unwrap();
     }
@@ -1691,7 +1817,7 @@ mod tests {
         for i in 0..100u64 {
             engine
                 .write_batch(&[Record {
-                    key: format!("k{:03}", i),
+                    key: format!("k{:03}", i).into_bytes(),
                     ts: i as i64,
                     expire_at: i64::MAX,
                     value: vec![42u8; 32],
@@ -1708,8 +1834,8 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
         assert_eq!(first_5.len(), 5);
-        assert_eq!(first_5[0].key, "k000");
-        assert_eq!(first_5[4].key, "k004");
+        assert_eq!(first_5[0].key, b"k000");
+        assert_eq!(first_5[4].key, b"k004");
 
         engine.shutdown().await.unwrap();
     }
@@ -1786,7 +1912,7 @@ mod tests {
         // Write 5000 records with large values to force many flushes.
         let big_val = vec![0xABu8; 4096];
         for i in 0..5000 {
-            let key = format!("pressure_{:05}", i);
+            let key = format!("pressure_{:05}", i).into_bytes();
             let rec = Record {
                 key,
                 ts: i as i64,
@@ -1806,7 +1932,7 @@ mod tests {
         assert_eq!(results.len(), 5000, "all 5000 records must survive");
 
         // Verify no data duplication or corruption.
-        let mut keys: Vec<String> = results.iter().map(|r| r.key.clone()).collect();
+        let mut keys: Vec<Vec<u8>> = results.iter().map(|r| r.key.clone()).collect();
         keys.sort();
         keys.dedup();
         assert_eq!(keys.len(), 5000, "no duplicate keys");
@@ -1839,5 +1965,152 @@ mod tests {
         });
         h1.await.unwrap();
         h2.await.unwrap();
+    }
+
+    /// Regression for the bloom hasher upgrade: write data, flush to SST,
+    /// then tamper with the persisted bloom's `hash_version` to simulate a
+    /// legacy filter. Reopening the engine MUST rebuild the bloom from the
+    /// SST file and the rebuilt filter must correctly answer point lookups.
+    #[tokio::test]
+    async fn test_bloom_rebuild_on_open_after_hash_upgrade() {
+        use crate::bloom::{BloomFilter, CURRENT_HASH_VERSION};
+
+        let dir = TempDir::new().unwrap();
+        let mut config = make_config(dir.path());
+        // Force flush quickly so we get an SST to work with.
+        config.memtable_size_mb = 1;
+        let engine = Engine::open(config.clone()).await.unwrap();
+
+        // Write enough distinct keys to make the bloom meaningful.
+        let records: Vec<Record> = (0..200)
+            .map(|i| Record {
+                key: format!("bloom_key_{:04}", i).into_bytes(),
+                ts: i as i64,
+                expire_at: i64::MAX,
+                value: vec![1, 2, 3],
+            })
+            .collect();
+        engine.write_batch(&records).await.unwrap();
+        engine.flush().await.unwrap();
+        engine.shutdown().await.unwrap();
+
+        // Tamper: rewrite the MANIFEST so every bloom has hash_version=0,
+        // simulating an upgrade from the legacy ahash-based bloom.
+        let manifest_path = dir.path().join("MANIFEST");
+        let original = std::fs::read_to_string(&manifest_path).unwrap();
+        let tampered = original.replace(
+            "\"hash_version\":1",
+            "\"hash_version\":0",
+        );
+        // Some blooms may have been written without hash_version (the field
+        // was missing in legacy manifests). The replacement above is a no-op
+        // if there's nothing to replace, which is fine.
+        if tampered != original {
+            std::fs::write(&manifest_path, tampered).unwrap();
+        }
+
+        // Reopen — Engine::open should detect stale blooms, scan the SST,
+        // and persist replacements via UpdateBloom entries.
+        let engine2 = Engine::open(config.clone()).await.unwrap();
+
+        // The newly rebuilt bloom must still recognise the inserted keys.
+        // We exercise this indirectly through point lookups — the engine
+        // would return None if the bloom filtered them out incorrectly.
+        for i in 0..200 {
+            let key = format!("bloom_key_{:04}", i);
+            let rec = engine2.get(&key, i as i64).await.unwrap();
+            assert!(
+                rec.is_some(),
+                "key {} missing after bloom rebuild — false negative",
+                key
+            );
+        }
+
+        // A key that was never inserted should not appear (sanity).
+        let absent = engine2.get("bloom_key_9999", 0).await.unwrap();
+        assert!(
+            absent.is_none(),
+            "absent key should not be found, got {:?}",
+            absent
+        );
+
+        // Verify the manifest now contains an UpdateBloom entry with the
+        // current hash_version. Reload the manifest directly to inspect.
+        engine2.shutdown().await.unwrap();
+        let manifest_text = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(
+            manifest_text.contains("\"update_bloom\""),
+            "expected UpdateBloom entry in manifest after rebuild, got: {}",
+            manifest_text
+        );
+
+        // And the persisted bloom should now report the current version.
+        let mf = crate::manifest::Manifest::open(dir.path()).unwrap();
+        for info in mf.state().sstables.values() {
+            if let Some(b) = &info.bloom {
+                assert_eq!(
+                    b.hash_version(),
+                    CURRENT_HASH_VERSION,
+                    "all blooms should be current after rebuild"
+                );
+            }
+        }
+        // Touch the BloomFilter type so the unused import warning stays
+        // quiet on toolchains that strip unused generics aggressively.
+        let _: &BloomFilter = mf
+            .state()
+            .sstables
+            .values()
+            .next()
+            .unwrap()
+            .bloom
+            .as_ref()
+            .unwrap();
+    }
+
+    /// Cross-restart correctness: a bloom built during one Engine instance
+    /// must remain valid after a clean shutdown and reopen. This catches
+    /// regressions where the persisted hasher seed accidentally changes
+    /// between runs.
+    #[tokio::test]
+    async fn test_bloom_remains_valid_across_clean_restart() {
+        let dir = TempDir::new().unwrap();
+        let mut config = make_config(dir.path());
+        config.memtable_size_mb = 1;
+
+        // Phase 1: write + flush + shutdown.
+        let records: Vec<Record> = (0..50)
+            .map(|i| Record {
+                key: format!("restart_key_{:03}", i).into_bytes(),
+                ts: i as i64,
+                expire_at: i64::MAX,
+                value: vec![9],
+            })
+            .collect();
+        {
+            let engine = Engine::open(config.clone()).await.unwrap();
+            engine.write_batch(&records).await.unwrap();
+            engine.flush().await.unwrap();
+            engine.shutdown().await.unwrap();
+        }
+
+        // Phase 2: reopen, every key must still be findable via point get.
+        // The bloom must not falsely claim "not in this SST".
+        {
+            let engine = Engine::open(config.clone()).await.unwrap();
+            for (i, rec) in records.iter().enumerate() {
+                let got = engine
+                    .get(&String::from_utf8_lossy(&rec.key), rec.ts)
+                    .await
+                    .unwrap();
+                assert!(
+                    got.is_some(),
+                    "key {} vanished after restart (bloom false negative?)",
+                    String::from_utf8_lossy(&rec.key)
+                );
+                let _ = i;
+            }
+            engine.shutdown().await.unwrap();
+        }
     }
 }
