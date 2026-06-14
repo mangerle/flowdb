@@ -40,7 +40,7 @@ cargo run --release --bin flowdb-stress
 - **Range tombstones** (`delete_range`) for efficient bulk key-range deletion
 - Garbage collection (TTL expiry), and point deletes
 - **Graceful shutdown** — `shutdown()` flushes WAL + memtables before exit
-- Prometheus-style metrics export
+- **Engine stats** — `engine.stats()` returns structured counters; `engine.metrics_text()` returns Prometheus-format string
 
 ## Quick Start
 
@@ -147,6 +147,8 @@ engine.shutdown().await?;
 | `trigger_gc()` | `Result<usize>` | Run garbage collection |
 | `trigger_compaction()` | `Result<bool>` | Trigger size-tiered compaction |
 | `shutdown()` | `Result<()>` | Graceful shutdown (flush + cleanup) |
+| `stats()` | `EngineStats` | Structured engine counters |
+| `metrics_text()` | `String` | Prometheus-format metrics string |
 
 ## Configuration
 
