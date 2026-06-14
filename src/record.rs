@@ -599,4 +599,44 @@ mod tests {
         // \xff\xff → all bytes overflow, sentinel [0xff, 0xff, 0] appended
         assert_eq!(increment_prefix_bytes(b"\xff\xff"), vec![0xff, 0xff, 0]);
     }
+
+    #[test]
+    fn test_sync_mode_default() {
+        assert_eq!(SyncMode::default(), SyncMode::Always);
+    }
+
+    #[test]
+    fn test_sync_mode_serde() {
+        assert_eq!(
+            serde_json::to_string(&SyncMode::Always).unwrap(),
+            r#""always""#
+        );
+        let m: SyncMode = serde_json::from_str(r#""always""#).unwrap();
+        assert_eq!(m, SyncMode::Always);
+
+        let m: SyncMode = serde_json::from_str(r#"{"intervalms":1}"#).unwrap();
+        assert_eq!(m, SyncMode::IntervalMs(1));
+    }
+
+    #[test]
+    fn test_config_serde_defaults() {
+        let json = r#"{"data_dir":"./data","memtable_size_mb":64,"block_size":8192,"zstd_level":3,"flush_interval_ms":1000,"time_bucket_secs":3600,"index_memory_budget_mb":256,"block_cache_capacity_mb":128,"bloom_bits_per_key":10,"wal_segment_size_mb":64,"compaction_threshold":2,"create_if_missing":true,"gc_interval_secs":3600,"max_frozen_memtables":2}"#;
+        let c: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(c.wal_sync_mode, SyncMode::Always);
+        assert!(c.auto_background);
+    }
+
+    #[test]
+    fn test_scan_range_key_time_range() {
+        let r = ScanRange::key_time_range("a", "z", 100, 200);
+        let (kf, tr) = r.to_query_params();
+        match kf {
+            KeyFilter::Range { start, end } => {
+                assert_eq!(start, b"a");
+                assert_eq!(end, b"z");
+            }
+            _ => panic!("expected range"),
+        }
+        assert_eq!(tr, Some((100, 200)));
+    }
 }

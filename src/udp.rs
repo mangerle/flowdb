@@ -450,4 +450,37 @@ mod tests {
         assert!(read_i64(&[0; 7], 0).is_none());
         assert!(read_i64(&[0; 8], 1).is_none());
     }
+
+    #[test]
+    fn test_token_bucket_rate_limiting() {
+        let mut bucket = TokenBucket::new(10); // 10 tokens/sec
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            assert!(bucket.try_consume(start), "should allow 10 initial tokens");
+        }
+        assert!(!bucket.try_consume(start), "should deny 11th token");
+        // With 200ms elapsed (~2 tokens refilled).
+        let later = start + std::time::Duration::from_millis(200);
+        assert!(bucket.try_consume(later), "should allow after refill");
+        assert!(bucket.try_consume(later), "should allow second refilled token");
+        assert!(!bucket.try_consume(later), "should deny third (no more refill)");
+    }
+
+    #[test]
+    fn test_auth_tag_deterministic() {
+        let tag1 = compute_auth_tag("secret", 5, b"payload");
+        let tag2 = compute_auth_tag("secret", 5, b"payload");
+        assert_eq!(tag1, tag2, "same inputs must produce same tag");
+        let tag3 = compute_auth_tag("secret", 6, b"payload");
+        assert_ne!(tag1, tag3, "different count must produce different tag");
+        let tag4 = compute_auth_tag("wrong", 5, b"payload");
+        assert_ne!(tag1, tag4, "different key must produce different tag");
+    }
+
+    #[test]
+    fn test_v2_frame_rejected_when_too_short_for_auth_tag() {
+        // V2 frame with version byte set but data too short for auth tag.
+        let frame = [MAGIC, VERSION_V2, 0x00, 0x01];
+        assert!(decode_frame(&frame, Some("key")).is_err());
+    }
 }
