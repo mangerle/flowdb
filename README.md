@@ -2,17 +2,19 @@
 
 A high-performance embedded time-series storage engine written in Rust, powered by an LSM-tree architecture with WAL, SSTables, and Bloom filters.
 
+**Fully synchronous API** — no async runtime required. FlowDB uses plain OS threads for background maintenance, making it runtime-agnostic. Use it from Tokio, async-std, smol, or plain synchronous code without any wrappers.
+
 ## Benchmark Results
 
 FlowDB vs RocksDB comparison (100K records, 128B values, batch=100, release build, Apple M-series):
 
 | Category | FlowDB | RocksDB | Result |
 |---|---|---|---|
-| Sequential Write | 3.7M ops/s | 3.2M ops/s | **FlowDB 1.18x faster** |
-| Concurrent Write (8 threads) | 10.2M ops/s | 4.6M ops/s | **FlowDB 2.24x faster** |
-| Point Query | 6.1M ops/s | 548K ops/s | **FlowDB 11.1x faster** |
-| Prefix Scan (~200 recs) | 71K ops/s | 11K ops/s | **FlowDB 6.3x faster** |
-| Full Scan (200K recs) | 73 ops/s | 40 ops/s | **FlowDB 1.82x faster** |
+| Sequential Write | 4.5M ops/s | 3.1M ops/s | **FlowDB 1.42x faster** |
+| Concurrent Write (8 threads) | 9.4M ops/s | 4.7M ops/s | **FlowDB 2.02x faster** |
+| Point Query | 6.0M ops/s | 549K ops/s | **FlowDB 10.95x faster** |
+| Prefix Scan (~200 recs) | 72K ops/s | 11K ops/s | **FlowDB 6.39x faster** |
+| Full Scan (200K recs) | 65 ops/s | 40 ops/s | **FlowDB 1.63x faster** |
 | Storage | 2.0MB | 1.8MB | ~same |
 
 **FlowDB wins on every category** — writes, reads, and scans.
@@ -24,6 +26,8 @@ cargo run --release --example flowdb-vs-rocksdb
 ## Features
 
 - LSM-tree storage with WAL (write-ahead log) for crash recovery
+- **Fully synchronous API** — no `async`, no Tokio dependency, runtime-agnostic
+- **Background maintenance on OS threads** — flush, compaction, GC via `std::thread`
 - **Per-record WAL checksums** — corruption detected on replay, bad records rejected
 - **Config validation** — invalid configs rejected at startup instead of crashing
 - **Frozen memtable backpressure** — writes stall when flush can't keep up
@@ -38,7 +42,6 @@ cargo run --release --example flowdb-vs-rocksdb
 - BTreeMap-based frozen memtable for O(log n) range queries on flush
 - Vec-based active memtable for O(1) writes (no key clone, no tree traversal)
 - Zero-copy owned write path (`write_batch_owned`)
-- Synchronous write path (`write_batch_sync`) for non-async callers
 - **Size-tiered compaction** with streaming heap merge (low memory footprint)
 - **Range tombstones** (`delete_range`) for efficient bulk key-range deletion
 - Garbage collection (TTL expiry), and point deletes
@@ -49,7 +52,7 @@ cargo run --release --example flowdb-vs-rocksdb
 
 ```toml
 [dependencies]
-flowdb = "0.2"
+flowdb = "0.3"
 ```
 
 ### Rust Library Usage
@@ -60,7 +63,7 @@ use flowdb::{
 };
 
 let config = Config::default();
-let engine = Engine::open(config).await?;
+let engine = Engine::open(config)?;
 
 // Write
 let records = vec![Record {
@@ -69,17 +72,17 @@ let records = vec![Record {
     expire_at: i64::MAX,
     value: b"22.5".to_vec(),
 }];
-engine.write_batch(&records).await?;
+engine.write_batch(&records)?;
 
 // Zero-copy write (moves key/value, no clones)
-engine.write_batch_owned(records).await?;
+engine.write_batch_owned(records)?;
 
 // Delete a range of keys (range tombstone)
-engine.delete_range("sensor.a", "sensor.z").await?;
+engine.delete_range("sensor.a", "sensor.z")?;
 
 // ── Eager query (returns Vec<Record>) ──
-let results = engine.query_by_prefix("sensor.").await?;
-let results = engine.query_prefix_time_range("sensor.", 1700000000, 1700003600).await?;
+let results = engine.query_by_prefix("sensor.")?;
+let results = engine.query_prefix_time_range("sensor.", 1700000000, 1700003600)?;
 
 // ── Lazy scan iterator (RocksDB-style, recommended for large ranges) ──
 
@@ -113,10 +116,10 @@ let first_10: Vec<Record> = engine
     .collect();
 
 // ── get_latest: retrieve the most recent record for a key ──
-let latest = engine.get_latest("sensor.temp").await?; // Option<Record>
+let latest = engine.get_latest("sensor.temp")?; // Option<Record>
 
 // Graceful shutdown (flushes WAL + memtables)
-engine.shutdown().await?;
+engine.shutdown()?;
 ```
 
 ### ScanRange Builders

@@ -84,8 +84,8 @@ fn gen_records(u: &mut Unstructured, max: usize) -> Vec<FuzzRecord> {
     records
 }
 
-#[tokio::test]
-async fn fuzz_wal_encode_decode() {
+#[test]
+fn fuzz_wal_encode_decode() {
     for seed in 0..FUZZ_ITERS {
         let dir = TempDir::new().unwrap();
         let config = make_config(dir.path());
@@ -100,14 +100,14 @@ async fn fuzz_wal_encode_decode() {
         let records: Vec<Record> = fuzz_records.iter().map(to_record).collect();
 
         {
-            let engine = Engine::open(config.clone()).await.unwrap();
+            let engine = Engine::open(config.clone()).unwrap();
             engine.write_batch(&records).unwrap();
-            engine.shutdown().await.unwrap();
+            engine.shutdown().unwrap();
         }
 
-        let engine2 = Engine::open(config).await.unwrap();
+        let engine2 = Engine::open(config).unwrap();
         for fr in &fuzz_records {
-            let results = engine2.query_by_prefix(&fr.key).await.unwrap();
+            let results = engine2.query_by_prefix(&fr.key).unwrap();
             let found = results.iter().any(|r| r.ts == fr.ts && r.value == fr.value);
             assert!(
                 found,
@@ -115,14 +115,14 @@ async fn fuzz_wal_encode_decode() {
                 seed, fr.key, fr.ts
             );
         }
-        engine2.shutdown().await.unwrap();
+        engine2.shutdown().unwrap();
 
         drop(dir);
     }
 }
 
-#[tokio::test]
-async fn fuzz_sstable_write_read() {
+#[test]
+fn fuzz_sstable_write_read() {
     for seed in 0..FUZZ_ITERS {
         let dir = TempDir::new().unwrap();
         let config = make_config(dir.path());
@@ -136,12 +136,12 @@ async fn fuzz_sstable_write_read() {
 
         let records: Vec<Record> = fuzz_records.iter().map(to_record).collect();
 
-        let engine = Engine::open(config).await.unwrap();
+        let engine = Engine::open(config).unwrap();
         engine.write_batch(&records).unwrap();
-        engine.flush().await.unwrap();
+        engine.flush().unwrap();
 
         for fr in &fuzz_records {
-            let results = engine.query_by_prefix(&fr.key).await.unwrap();
+            let results = engine.query_by_prefix(&fr.key).unwrap();
             let found = results.iter().any(|r| r.ts == fr.ts && r.value == fr.value);
             assert!(
                 found,
@@ -149,13 +149,13 @@ async fn fuzz_sstable_write_read() {
                 seed, fr.key, fr.ts
             );
         }
-        engine.shutdown().await.unwrap();
+        engine.shutdown().unwrap();
         drop(dir);
     }
 }
 
-#[tokio::test]
-async fn fuzz_memtable_query() {
+#[test]
+fn fuzz_memtable_query() {
     for seed in 0..FUZZ_ITERS {
         let dir = TempDir::new().unwrap();
         let mut config = make_config(dir.path());
@@ -170,11 +170,11 @@ async fn fuzz_memtable_query() {
 
         let records: Vec<Record> = fuzz_records.iter().map(to_record).collect();
 
-        let engine = Engine::open(config).await.unwrap();
+        let engine = Engine::open(config).unwrap();
         engine.write_batch(&records).unwrap();
 
         for fr in &fuzz_records {
-            let results = engine.query_by_prefix(&fr.key).await.unwrap();
+            let results = engine.query_by_prefix(&fr.key).unwrap();
             assert!(
                 !results.is_empty(),
                 "seed={}: memtable query returned empty for key={}",
@@ -189,7 +189,7 @@ async fn fuzz_memtable_query() {
                 all_keys.iter().min().unwrap().clone(),
                 all_keys.iter().max().unwrap().clone(),
             ))
-            .await
+            
             .unwrap();
         assert!(
             !all_results.is_empty(),
@@ -197,13 +197,13 @@ async fn fuzz_memtable_query() {
             seed
         );
 
-        engine.shutdown().await.unwrap();
+        engine.shutdown().unwrap();
         drop(dir);
     }
 }
 
-#[tokio::test]
-async fn fuzz_engine_write_query() {
+#[test]
+fn fuzz_engine_write_query() {
     for seed in 0..FUZZ_ITERS {
         let dir = TempDir::new().unwrap();
         let config = make_config(dir.path());
@@ -211,7 +211,7 @@ async fn fuzz_engine_write_query() {
         let data = generate_seed_data(seed);
         let mut u = Unstructured::new(&data);
 
-        let engine = Engine::open(config).await.unwrap();
+        let engine = Engine::open(config).unwrap();
 
         let batch_count = u.int_in_range(1usize..=3).unwrap_or(1);
         let mut all_written: Vec<Record> = Vec::new();
@@ -227,13 +227,13 @@ async fn fuzz_engine_write_query() {
         }
 
         if all_written.is_empty() {
-            engine.shutdown().await.unwrap();
+            engine.shutdown().unwrap();
             continue;
         }
 
         if let Some(key) = all_written.first().map(|r| r.key.clone()) {
             let key_str = String::from_utf8_lossy(&key);
-            let results = engine.query_by_prefix(&key_str).await.unwrap();
+            let results = engine.query_by_prefix(&key_str).unwrap();
             assert!(
                 !results.is_empty(),
                 "seed={}: prefix query empty for key={:?}",
@@ -244,16 +244,16 @@ async fn fuzz_engine_write_query() {
 
         let min_ts = all_written.iter().map(|r| r.ts).min().unwrap();
         let max_ts = all_written.iter().map(|r| r.ts).max().unwrap();
-        let results = engine.query_time_range(min_ts, max_ts).await.unwrap();
+        let results = engine.query_time_range(min_ts, max_ts).unwrap();
         assert!(!results.is_empty(), "seed={}: time_range query empty", seed);
 
-        engine.shutdown().await.unwrap();
+        engine.shutdown().unwrap();
         drop(dir);
     }
 }
 
-#[tokio::test]
-async fn fuzz_manifest_recovery() {
+#[test]
+fn fuzz_manifest_recovery() {
     for seed in 0..FUZZ_ITERS {
         let dir = TempDir::new().unwrap();
         let config = make_config(dir.path());
@@ -268,9 +268,9 @@ async fn fuzz_manifest_recovery() {
         let records: Vec<Record> = fuzz_records.iter().map(to_record).collect();
 
         {
-            let engine = Engine::open(config.clone()).await.unwrap();
+            let engine = Engine::open(config.clone()).unwrap();
             engine.write_batch(&records).unwrap();
-            engine.flush().await.unwrap();
+            engine.flush().unwrap();
 
             let fuzz_more = gen_records(&mut u, 10);
             let more_records: Vec<Record> = fuzz_more.iter().map(to_record).collect();
@@ -278,12 +278,12 @@ async fn fuzz_manifest_recovery() {
                 engine.write_batch(&more_records).unwrap();
             }
 
-            engine.shutdown().await.unwrap();
+            engine.shutdown().unwrap();
         }
 
-        let engine2 = Engine::open(config).await.unwrap();
+        let engine2 = Engine::open(config).unwrap();
         for fr in &fuzz_records {
-            let results = engine2.query_by_prefix(&fr.key).await.unwrap();
+            let results = engine2.query_by_prefix(&fr.key).unwrap();
             let found = results.iter().any(|r| r.ts == fr.ts && r.value == fr.value);
             assert!(
                 found,
@@ -291,13 +291,13 @@ async fn fuzz_manifest_recovery() {
                 seed, fr.key, fr.ts
             );
         }
-        engine2.shutdown().await.unwrap();
+        engine2.shutdown().unwrap();
         drop(dir);
     }
 }
 
-#[tokio::test]
-async fn fuzz_block_meta_index_queries() {
+#[test]
+fn fuzz_block_meta_index_queries() {
     for seed in 0..FUZZ_ITERS {
         let dir = TempDir::new().unwrap();
         let config = make_config(dir.path());
@@ -305,7 +305,7 @@ async fn fuzz_block_meta_index_queries() {
         let data = generate_seed_data(seed);
         let mut u = Unstructured::new(&data);
 
-        let engine = Engine::open(config).await.unwrap();
+        let engine = Engine::open(config).unwrap();
 
         let mut all_keys = Vec::new();
         for _ in 0..3 {
@@ -316,16 +316,16 @@ async fn fuzz_block_meta_index_queries() {
             }
             all_keys.extend(fuzz_recs.iter().map(|r| r.key.clone()));
             engine.write_batch(&records).unwrap();
-            engine.flush().await.unwrap();
+            engine.flush().unwrap();
         }
 
         if all_keys.is_empty() {
-            engine.shutdown().await.unwrap();
+            engine.shutdown().unwrap();
             continue;
         }
 
         for key in &all_keys {
-            let _ = engine.query_by_prefix(key).await.unwrap();
+            let _ = engine.query_by_prefix(key).unwrap();
         }
 
         if all_keys.len() >= 2 {
@@ -333,20 +333,20 @@ async fn fuzz_block_meta_index_queries() {
             sorted.sort();
             let _ = engine
                 .query_by_key_range(&sorted[0], sorted.last().unwrap())
-                .await
+                
                 .unwrap();
         }
 
-        let _ = engine.query_time_range(0, 1_000_000).await.unwrap();
+        let _ = engine.query_time_range(0, 1_000_000).unwrap();
 
         if let Some(key) = all_keys.first() {
             let _ = engine
                 .query_prefix_time_range(key, 0, 1_000_000)
-                .await
+                
                 .unwrap();
         }
 
-        engine.shutdown().await.unwrap();
+        engine.shutdown().unwrap();
         drop(dir);
     }
 }

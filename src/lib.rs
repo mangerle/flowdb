@@ -14,7 +14,7 @@ mod sstable;
 mod wal;
 mod write_worker;
 
-pub use engine::{Engine, ScanIterator};
+pub use engine::{Engine, MaintenanceHandle, ScanIterator};
 pub use error::{FlowError, Result};
 pub use record::{Config, KeyFilter, Op, Query, ReadOptions, Record, ScanRange, SyncMode};
 pub use stats::EngineStats;

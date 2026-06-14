@@ -1,5 +1,3 @@
-// Enable the unstable `coverage_attribute` feature only when running
-// cargo-llvm-cov on nightly, so we can exclude the untestable `main()`.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use flowdb::{Config, Engine, Query, Record, SyncMode};
@@ -95,7 +93,7 @@ fn print_result(label: &str, count: u64, elapsed: Duration, extra: Option<&str>)
     );
 }
 
-async fn bench_sequential_writes(
+fn bench_sequential_writes(
     engine: &Engine,
     n: u64,
     batch_size: usize,
@@ -123,7 +121,7 @@ async fn bench_sequential_writes(
     start.elapsed()
 }
 
-async fn bench_concurrent_writes(
+fn bench_concurrent_writes(
     engine: Arc<Engine>,
     total_records: u64,
     concurrency: usize,
@@ -137,7 +135,7 @@ async fn bench_concurrent_writes(
     for worker_id in 0..concurrency {
         let engine = engine.clone();
         let written = written.clone();
-        handles.push(tokio::spawn(async move {
+        handles.push(std::thread::spawn(move || {
             loop {
                 let batch_start = written.fetch_add(batch_size as u64, Ordering::Relaxed);
                 if batch_start >= total_records {
@@ -160,12 +158,12 @@ async fn bench_concurrent_writes(
         }));
     }
     for h in handles {
-        h.await.unwrap();
+        h.join().unwrap();
     }
     start.elapsed()
 }
 
-async fn bench_concurrent_reads(
+fn bench_concurrent_reads(
     engine: Arc<Engine>,
     prefixes: &[String],
     concurrency: usize,
@@ -176,10 +174,10 @@ async fn bench_concurrent_reads(
     for worker_id in 0..concurrency {
         let engine = engine.clone();
         let prefix = prefixes[worker_id % prefixes.len()].clone();
-        handles.push(tokio::spawn(async move {
+        handles.push(std::thread::spawn(move || {
             let mut total_records = 0usize;
             for _ in 0..queries_per_worker {
-                let results = engine.query(Query::prefix(&prefix)).await.unwrap();
+                let results = engine.query(Query::prefix(&prefix)).unwrap();
                 total_records += results.len();
             }
             total_records
@@ -187,7 +185,7 @@ async fn bench_concurrent_reads(
     }
     let mut total = 0usize;
     for h in handles {
-        total += h.await.unwrap();
+        total += h.join().unwrap();
     }
     let elapsed = start.elapsed();
     let total_queries = concurrency * queries_per_worker;
@@ -200,7 +198,7 @@ async fn bench_concurrent_reads(
     elapsed
 }
 
-async fn bench_mixed_rw(
+fn bench_mixed_rw(
     engine: Arc<Engine>,
     total_ops: u64,
     write_ratio: f64,
@@ -214,7 +212,7 @@ async fn bench_mixed_rw(
     let mut handles = Vec::new();
     for worker_id in 0..concurrency {
         let engine = engine.clone();
-        handles.push(tokio::spawn(async move {
+        handles.push(std::thread::spawn(move || {
             let mut write_count = 0u64;
             let mut read_count = 0u64;
             for i in 0..ops_per_worker {
@@ -229,7 +227,7 @@ async fn bench_mixed_rw(
                     write_count += 1;
                 } else {
                     let prefix = format!("mix{}_{}", worker_id, i % 10);
-                    let _ = engine.query(Query::prefix(&prefix)).await.unwrap();
+                    let _ = engine.query(Query::prefix(&prefix)).unwrap();
                     read_count += 1;
                 }
             }
@@ -239,7 +237,7 @@ async fn bench_mixed_rw(
     let mut total_writes = 0u64;
     let mut total_reads = 0u64;
     for h in handles {
-        let (w, r) = h.await.unwrap();
+        let (w, r) = h.join().unwrap();
         total_writes += w;
         total_reads += r;
     }
@@ -258,8 +256,7 @@ async fn bench_mixed_rw(
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[tokio::main]
-async fn main() {
+fn main() {
     let dir = make_temp_dir();
     let config = stress_config(&dir);
 
@@ -271,7 +268,7 @@ async fn main() {
     println!("  memtable:    {}MB", config.memtable_size_mb);
     println!("  block_size:  {}B", config.block_size);
 
-    let engine = Arc::new(Engine::open(config).await.unwrap());
+    let engine = Arc::new(Engine::open(config).unwrap());
 
     let small_val = 64usize;
     let medium_val = 512usize;
@@ -281,7 +278,7 @@ async fn main() {
     print_header("1. Sequential Writes (single writer)");
 
     let n = 50_000u64;
-    let elapsed = bench_sequential_writes(&engine, n, 100, small_val).await;
+    let elapsed = bench_sequential_writes(&engine, n, 100, small_val);
     print_result(
         &format!("batch=100, val={}B", small_val),
         n,
@@ -290,7 +287,7 @@ async fn main() {
     );
 
     let n = 20_000u64;
-    let elapsed = bench_sequential_writes(&engine, n, 50, medium_val).await;
+    let elapsed = bench_sequential_writes(&engine, n, 50, medium_val);
     print_result(
         &format!("batch=50, val={}B", medium_val),
         n,
@@ -299,7 +296,7 @@ async fn main() {
     );
 
     let n = 5_000u64;
-    let elapsed = bench_sequential_writes(&engine, n, 10, large_val).await;
+    let elapsed = bench_sequential_writes(&engine, n, 10, large_val);
     print_result(
         &format!("batch=10, val={}B", large_val),
         n,
@@ -313,7 +310,7 @@ async fn main() {
     for &concurrency in &[1usize, 4, 8, 16] {
         let total = 50_000u64;
         let elapsed =
-            bench_concurrent_writes(engine.clone(), total, concurrency, 50, small_val).await;
+            bench_concurrent_writes(engine.clone(), total, concurrency, 50, small_val);
         print_result(
             &format!("{} workers, batch=50", concurrency),
             total,
@@ -326,7 +323,7 @@ async fn main() {
     print_header("3. Flush to SST");
     let before = engine.stats();
     let flush_start = Instant::now();
-    engine.flush().await.unwrap();
+    engine.flush().unwrap();
     let flush_elapsed = flush_start.elapsed();
     let after = engine.stats();
     println!(
@@ -346,7 +343,7 @@ async fn main() {
     // narrow prefix — should hit few blocks
     let start = Instant::now();
     for _ in 0..n_q {
-        let _ = engine.query(Query::prefix("seq_000000")).await.unwrap();
+        let _ = engine.query(Query::prefix("seq_000000")).unwrap();
     }
     let elapsed = start.elapsed();
     print_result("prefix (narrow, ~1 record)", n_q as u64, elapsed, None);
@@ -354,7 +351,7 @@ async fn main() {
     // wider prefix
     let start = Instant::now();
     for _ in 0..100 {
-        let _ = engine.query(Query::prefix("seq_0000")).await.unwrap();
+        let _ = engine.query(Query::prefix("seq_0000")).unwrap();
     }
     let elapsed = start.elapsed();
     print_result("prefix (wide, ~10K records)", 100, elapsed, None);
@@ -364,7 +361,7 @@ async fn main() {
     for _ in 0..n_q {
         let _ = engine
             .query(Query::key_range("seq_00000000", "seq_00000100"))
-            .await
+            
             .unwrap();
     }
     let elapsed = start.elapsed();
@@ -375,21 +372,21 @@ async fn main() {
 
     let prefixes: Vec<String> = (0..10).map(|i| format!("seq_{:04}", i * 500)).collect();
     for &concurrency in &[1usize, 4, 8] {
-        bench_concurrent_reads(engine.clone(), &prefixes, concurrency, 100).await;
+        bench_concurrent_reads(engine.clone(), &prefixes, concurrency, 100);
     }
 
     // ── 6. Mixed read/write ─────────────────────────────────
     print_header("6. Mixed Read/Write Workload");
 
     for &ratio in &[0.2f64, 0.5, 0.8] {
-        bench_mixed_rw(engine.clone(), 10_000, ratio, 4, small_val).await;
+        bench_mixed_rw(engine.clone(), 10_000, ratio, 4, small_val);
     }
 
     // ── 7. Compaction ───────────────────────────────────────
     print_header("7. Compaction");
     let before = engine.stats();
     let compact_start = Instant::now();
-    let did_compact = engine.trigger_compaction().await.unwrap();
+    let did_compact = engine.trigger_compaction().unwrap();
     let compact_elapsed = compact_start.elapsed();
     let after = engine.stats();
     println!(
@@ -404,7 +401,7 @@ async fn main() {
     print_header("8. Post-Compaction Queries");
     let start = Instant::now();
     for _ in 0..n_q {
-        let _ = engine.query(Query::prefix("seq_000000")).await.unwrap();
+        let _ = engine.query(Query::prefix("seq_000000")).unwrap();
     }
     let elapsed = start.elapsed();
     print_result(
@@ -447,9 +444,9 @@ async fn main() {
     );
 
     match Arc::try_unwrap(engine) {
-        Ok(e) => e.shutdown().await.unwrap(),
+        Ok(e) => e.shutdown().unwrap(),
         Err(arc) => {
-            arc.flush().await.unwrap();
+            arc.flush().unwrap();
         }
     }
     cleanup_temp_dir(&dir);
@@ -543,33 +540,33 @@ mod tests {
         print_result("slow", 10, d, None);
     }
 
-    #[tokio::test]
-    async fn test_bench_sequential_writes_runs() {
+    #[test]
+    fn test_bench_sequential_writes_runs() {
         let dir = make_temp_dir();
         let cfg = stress_config(&dir);
-        let engine = Engine::open(cfg).await.unwrap();
-        let d = bench_sequential_writes(&engine, 5, 2, 8).await;
+        let engine = Engine::open(cfg).unwrap();
+        let d = bench_sequential_writes(&engine, 5, 2, 8);
         assert!(d.as_nanos() > 0);
-        engine.shutdown().await.unwrap();
+        engine.shutdown().unwrap();
         cleanup_temp_dir(&dir);
     }
 
-    #[tokio::test]
-    async fn test_bench_concurrent_writes_runs() {
+    #[test]
+    fn test_bench_concurrent_writes_runs() {
         let dir = make_temp_dir();
         let cfg = stress_config(&dir);
-        let engine = Arc::new(Engine::open(cfg).await.unwrap());
-        let d = bench_concurrent_writes(engine.clone(), 50, 2, 5, 8).await;
+        let engine = Arc::new(Engine::open(cfg).unwrap());
+        let d = bench_concurrent_writes(engine.clone(), 50, 2, 5, 8);
         assert!(d.as_nanos() > 0);
-        let _ = engine.flush().await;
+        let _ = engine.flush();
         cleanup_temp_dir(&dir);
     }
 
-    #[tokio::test]
-    async fn test_bench_concurrent_reads_runs() {
+    #[test]
+    fn test_bench_concurrent_reads_runs() {
         let dir = make_temp_dir();
         let cfg = stress_config(&dir);
-        let engine = Arc::new(Engine::open(cfg).await.unwrap());
+        let engine = Arc::new(Engine::open(cfg).unwrap());
         engine
             .write_batch(&[Record {
                 key: b"prefix_a".to_vec(),
@@ -579,57 +576,57 @@ mod tests {
             }])
             .unwrap();
         let prefixes = vec!["prefix_a".to_string()];
-        let d = bench_concurrent_reads(engine.clone(), &prefixes, 2, 3).await;
+        let d = bench_concurrent_reads(engine.clone(), &prefixes, 2, 3);
         assert!(d.as_nanos() > 0);
-        let _ = engine.flush().await;
+        let _ = engine.flush();
         cleanup_temp_dir(&dir);
     }
 
-    #[tokio::test]
-    async fn test_bench_mixed_rw_runs() {
+    #[test]
+    fn test_bench_mixed_rw_runs() {
         let dir = make_temp_dir();
         let cfg = stress_config(&dir);
-        let engine = Arc::new(Engine::open(cfg).await.unwrap());
-        let d = bench_mixed_rw(engine.clone(), 40, 0.5, 2, 16).await;
+        let engine = Arc::new(Engine::open(cfg).unwrap());
+        let d = bench_mixed_rw(engine.clone(), 40, 0.5, 2, 16);
         assert!(d.as_nanos() > 0);
-        let _ = engine.flush().await;
+        let _ = engine.flush();
         cleanup_temp_dir(&dir);
     }
 
-    #[tokio::test]
-    async fn test_bench_mixed_rw_all_reads() {
+    #[test]
+    fn test_bench_mixed_rw_all_reads() {
         // write_ratio = 0.0 → all reads (exercises the else branch entirely).
         let dir = make_temp_dir();
         let cfg = stress_config(&dir);
-        let engine = Arc::new(Engine::open(cfg).await.unwrap());
-        let d = bench_mixed_rw(engine.clone(), 20, 0.0, 2, 8).await;
+        let engine = Arc::new(Engine::open(cfg).unwrap());
+        let d = bench_mixed_rw(engine.clone(), 20, 0.0, 2, 8);
         assert!(d.as_nanos() > 0);
-        let _ = engine.flush().await;
+        let _ = engine.flush();
         cleanup_temp_dir(&dir);
     }
 
-    #[tokio::test]
-    async fn test_bench_sequential_writes_smaller_than_batch() {
+    #[test]
+    fn test_bench_sequential_writes_smaller_than_batch() {
         // n < batch_size → exercises the inner break path.
         let dir = make_temp_dir();
         let cfg = stress_config(&dir);
-        let engine = Engine::open(cfg).await.unwrap();
-        let d = bench_sequential_writes(&engine, 3, 100, 4).await;
+        let engine = Engine::open(cfg).unwrap();
+        let d = bench_sequential_writes(&engine, 3, 100, 4);
         assert!(d.as_nanos() > 0);
-        engine.shutdown().await.unwrap();
+        engine.shutdown().unwrap();
         cleanup_temp_dir(&dir);
     }
 
-    #[tokio::test]
-    async fn test_bench_concurrent_writes_over_subscription() {
+    #[test]
+    fn test_bench_concurrent_writes_over_subscription() {
         // concurrency * batch_size > total_records → exercises the
         // fetch_sub rollback when batch_start exceeds total.
         let dir = make_temp_dir();
         let cfg = stress_config(&dir);
-        let engine = Arc::new(Engine::open(cfg).await.unwrap());
-        let d = bench_concurrent_writes(engine.clone(), 5, 8, 50, 8).await;
+        let engine = Arc::new(Engine::open(cfg).unwrap());
+        let d = bench_concurrent_writes(engine.clone(), 5, 8, 50, 8);
         assert!(d.as_nanos() > 0);
-        let _ = engine.flush().await;
+        let _ = engine.flush();
         cleanup_temp_dir(&dir);
     }
 }

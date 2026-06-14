@@ -778,8 +778,6 @@ fn bench_block_meta_index(c: &mut Criterion) {
 fn bench_engine(c: &mut Criterion) {
     let mut group = c.benchmark_group("engine");
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-
     for batch_size in [10usize, 100, 1000] {
         group.throughput(Throughput::Elements(batch_size as u64));
         group.bench_with_input(
@@ -790,7 +788,7 @@ fn bench_engine(c: &mut Criterion) {
                     || {
                         let dir = TempDir::new().unwrap();
                         let config = make_config(dir.path());
-                        let engine = rt.block_on(Engine::open(config)).unwrap();
+                        let engine = Engine::open(config).unwrap();
                         let records: Vec<Record> = (0..batch_size)
                             .map(|i| Record {
                                 key: format!("bench_key_{:06}", i).into_bytes(),
@@ -802,8 +800,8 @@ fn bench_engine(c: &mut Criterion) {
                         (dir, engine, records)
                     },
                     |(dir, engine, records): (TempDir, Engine, Vec<Record>)| {
-                        rt.block_on(engine.write_batch(&records)).unwrap();
-                        rt.block_on(engine.shutdown()).unwrap();
+                        engine.write_batch(&records).unwrap();
+                        engine.shutdown().unwrap();
                         drop(dir);
                     },
                     BatchSize::SmallInput,
@@ -823,15 +821,13 @@ fn bench_engine(c: &mut Criterion) {
 
     let dir = TempDir::new().unwrap();
     let config = make_config(dir.path());
-    let engine = rt.block_on(Engine::open(config)).unwrap();
-    rt.block_on(engine.write_batch(&records_for_query)).unwrap();
+    let engine = Engine::open(config).unwrap();
+    engine.write_batch(&records_for_query).unwrap();
 
     group.throughput(Throughput::Elements(1));
     group.bench_function("query_prefix", |b| {
         b.iter(|| {
-            let results = rt
-                .block_on(engine.query(Query::prefix("query_key_000")))
-                .unwrap();
+            let results = engine.query(Query::prefix("query_key_000")).unwrap();
             black_box(results.len());
         });
     });
@@ -839,8 +835,8 @@ fn bench_engine(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
     group.bench_function("query_key_range", |b| {
         b.iter(|| {
-            let results = rt
-                .block_on(engine.query(Query::key_range("query_key_000100", "query_key_000500")))
+            let results = engine
+                .query(Query::key_range("query_key_000100", "query_key_000500"))
                 .unwrap();
             black_box(results.len());
         });
@@ -849,9 +845,7 @@ fn bench_engine(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
     group.bench_function("query_time_range", |b| {
         b.iter(|| {
-            let results = rt
-                .block_on(engine.query(Query::time_range(10000, 50000)))
-                .unwrap();
+            let results = engine.query(Query::time_range(10000, 50000)).unwrap();
             black_box(results.len());
         });
     });
@@ -859,8 +853,8 @@ fn bench_engine(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
     group.bench_function("query_prefix_time_range", |b| {
         b.iter(|| {
-            let results = rt
-                .block_on(engine.query(Query::prefix_time_range("query_key_", 10000, 50000)))
+            let results = engine
+                .query(Query::prefix_time_range("query_key_", 10000, 50000))
                 .unwrap();
             black_box(results.len());
         });
@@ -869,64 +863,19 @@ fn bench_engine(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
     group.bench_function("query_key_time_range", |b| {
         b.iter(|| {
-            let results = rt
-                .block_on(engine.query(Query::key_time_range(
+            let results = engine
+                .query(Query::key_time_range(
                     "query_key_000100",
                     "query_key_000500",
                     10000,
                     50000,
-                )))
+                ))
                 .unwrap();
             black_box(results.len());
         });
     });
 
-    rt.block_on(engine.shutdown()).unwrap();
-
-    group.finish();
-}
-
-fn bench_udp_frame(c: &mut Criterion) {
-    let mut group = c.benchmark_group("udp_frame");
-
-    let rec = flowdb::Record {
-        key: "benchmark_key".into(),
-        ts: 1234567890,
-        expire_at: 1234567890 + 3600 * 1_000_000,
-        value: b"benchmark_value_data".to_vec(),
-    };
-    let rec_no_ttl = flowdb::Record {
-        key: "key_no_ttl".into(),
-        ts: 99999,
-        expire_at: i64::MAX,
-        value: b"val".to_vec(),
-    };
-
-    group.throughput(Throughput::Elements(1));
-    group.bench_function("encode_frame", |b| {
-        b.iter(|| {
-            let frame = flowdb::udp::encode_frame(black_box(std::slice::from_ref(&rec)));
-            black_box(frame.len());
-        });
-    });
-
-    let encoded = flowdb::udp::encode_frame(&[rec]);
-
-    group.throughput(Throughput::Elements(1));
-    group.bench_function("decode_frame", |b| {
-        b.iter(|| {
-            let records = flowdb::udp::decode_frame(black_box(&encoded)).unwrap();
-            black_box(records.len());
-        });
-    });
-
-    group.throughput(Throughput::Elements(1));
-    group.bench_function("encode_no_ttl", |b| {
-        b.iter(|| {
-            let frame = flowdb::udp::encode_frame(black_box(std::slice::from_ref(&rec_no_ttl)));
-            black_box(frame.len());
-        });
-    });
+    engine.shutdown().unwrap();
 
     group.finish();
 }
@@ -960,7 +909,6 @@ criterion_group!(
     bench_sstable,
     bench_block_meta_index,
     bench_engine,
-    bench_udp_frame,
     bench_crc32,
 );
 criterion_main!(benches);

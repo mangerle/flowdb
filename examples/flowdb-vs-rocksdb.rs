@@ -141,8 +141,7 @@ fn make_value() -> Vec<u8> {
 
 // ── FlowDB benchmarks ──────────────────────────────────
 
-#[tokio::main]
-async fn main() {
+fn main() {
     println!("╔════════════════════════════════════════════════════════════╗");
     println!("║        FlowDB vs RocksDB — Comparative Benchmark         ║");
     println!("╚════════════════════════════════════════════════════════════╝");
@@ -152,29 +151,29 @@ async fn main() {
     // ── FlowDB ────────────────────────────────────────────
     let fdir = temp_dir("flowdb");
     let fcfg = flowdb_config(&fdir);
-    let fengine = Arc::new(Engine::open(fcfg).await.unwrap());
+    let fengine = Arc::new(Engine::open(fcfg).unwrap());
 
     println!();
     println!("══════════ FlowDB ══════════");
 
-    let f_seq_write = bench_flowdb_seq_write(&fengine, N, BATCH).await;
+    let f_seq_write = bench_flowdb_seq_write(&fengine, N, BATCH);
     print_single(&f_seq_write);
 
-    let f_conc_write = bench_flowdb_conc_write(fengine.clone(), N, 8, BATCH).await;
+    let f_conc_write = bench_flowdb_conc_write(fengine.clone(), N, 8, BATCH);
     print_single(&f_conc_write);
 
-    fengine.flush().await.unwrap();
-    fengine.trigger_compaction().await.unwrap();
+    fengine.flush().unwrap();
+    fengine.trigger_compaction().unwrap();
     let sst_count = fengine.stats().sstable_count;
     println!("  flushed → {} sstables", sst_count);
 
-    let f_point = bench_flowdb_point(&fengine, 10_000).await;
+    let f_point = bench_flowdb_point(&fengine, 10_000);
     print_single(&f_point);
 
-    let f_prefix = bench_flowdb_prefix(&fengine, 1_000).await;
+    let f_prefix = bench_flowdb_prefix(&fengine, 1_000);
     print_single(&f_prefix);
 
-    let f_full_scan = bench_flowdb_full_scan(&fengine).await;
+    let f_full_scan = bench_flowdb_full_scan(&fengine);
     print_single(&f_full_scan);
 
     let f_stats = fengine.stats();
@@ -335,9 +334,9 @@ async fn main() {
     // cleanup
     drop(rdb);
     match Arc::try_unwrap(fengine) {
-        Ok(e) => e.shutdown().await.unwrap(),
+        Ok(e) => e.shutdown().unwrap(),
         Err(a) => {
-            a.flush().await.unwrap();
+            a.flush().unwrap();
         }
     }
     cleanup(&fdir);
@@ -348,7 +347,7 @@ async fn main() {
 
 // ── FlowDB benchmark functions ──────────────────────────
 
-async fn bench_flowdb_seq_write(engine: &Engine, n: u64, batch: usize) -> BenchResult {
+fn bench_flowdb_seq_write(engine: &Engine, n: u64, batch: usize) -> BenchResult {
     let val = make_value();
     let start = Instant::now();
     let mut key_counter = 0u64;
@@ -380,7 +379,7 @@ async fn bench_flowdb_seq_write(engine: &Engine, n: u64, batch: usize) -> BenchR
     }
 }
 
-async fn bench_flowdb_conc_write(
+fn bench_flowdb_conc_write(
     engine: Arc<Engine>,
     n: u64,
     threads: usize,
@@ -433,12 +432,12 @@ async fn bench_flowdb_conc_write(
     }
 }
 
-async fn bench_flowdb_point(engine: &Engine, rounds: usize) -> BenchResult {
+fn bench_flowdb_point(engine: &Engine, rounds: usize) -> BenchResult {
     let start = Instant::now();
     for i in 0..rounds {
         let key = make_key((i as u64 * 10) % N);
         let ts = ((i as u64 * 10) % N) as i64;
-        let _ = engine.get(&key, ts).await.unwrap();
+        let _ = engine.get(&key, ts).unwrap();
     }
     let elapsed = start.elapsed();
     BenchResult {
@@ -450,12 +449,12 @@ async fn bench_flowdb_point(engine: &Engine, rounds: usize) -> BenchResult {
     }
 }
 
-async fn bench_flowdb_prefix(engine: &Engine, rounds: usize) -> BenchResult {
+fn bench_flowdb_prefix(engine: &Engine, rounds: usize) -> BenchResult {
     let start = Instant::now();
     let mut total_records = 0usize;
     for i in 0..rounds {
         let prefix = format!("key_{:04}", i % 100);
-        let results = engine.query(Query::prefix(&prefix)).await.unwrap();
+        let results = engine.query(Query::prefix(&prefix)).unwrap();
         total_records += results.len();
     }
     let elapsed = start.elapsed();
@@ -468,9 +467,9 @@ async fn bench_flowdb_prefix(engine: &Engine, rounds: usize) -> BenchResult {
     }
 }
 
-async fn bench_flowdb_full_scan(engine: &Engine) -> BenchResult {
+fn bench_flowdb_full_scan(engine: &Engine) -> BenchResult {
     let start = Instant::now();
-    let results = engine.query(Query::prefix("")).await.unwrap();
+    let results = engine.query(Query::prefix("")).unwrap();
     let elapsed = start.elapsed();
     BenchResult {
         label: "Full Scan".into(),
