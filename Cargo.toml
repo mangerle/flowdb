@@ -1,27 +1,18 @@
 [package]
 name = "flowdb"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 authors = ["jinti<shenjindi@fourz.cn>"]
 repository = "https://github.com/restsend/flowdb"
-description = "A time-series database written in Rust, designed for high performance and low latency."
+description = "A high-performance embedded time-series storage engine written in Rust, powered by an LSM-tree architecture."
 readme = "README.md"
 keywords = ["database", "embedded", "lsm-tree", "persistence", "time-series"]
 categories = ["database"]
 license = "MIT"
 
-[features]
-default = ["server"]
-server = ["dep:axum", "dep:tower-http", "dep:base64"]
-
 [lib]
 name = "flowdb"
 path = "src/lib.rs"
-
-[[bin]]
-name = "flowdb-server"
-path = "src/bin/flowdb-server.rs"
-required-features = ["server"]
 
 [[bin]]
 name = "flowdb-stress"
@@ -38,9 +29,6 @@ thiserror = "2"
 hdrhistogram = "7"
 toml = "1.1.2"
 memmap2 = "0.9"
-axum = { version = "0.8", optional = true }
-tower-http = { version = "0.6", features = ["cors", "trace"], optional = true }
-base64 = { version = "0.22", optional = true }
 clap = { version = "4", features = ["derive"] }
 tracing-subscriber = "0.3"
 lru = "0.18"
@@ -49,7 +37,6 @@ lz4_flex = "0.13.1"
 
 [dev-dependencies]
 tempfile = "3"
-tower = { version = "0.5", features = ["util"] }
 criterion = "0.8.2"
 arbitrary = { version = "1", features = ["derive"] }
 rocksdb = "0.24"
