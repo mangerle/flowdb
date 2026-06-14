@@ -280,7 +280,17 @@ pub async fn admin_handler() -> axum::response::Html<&'static str> {
 
 pub async fn admin_flush(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ActionResponse>)> {
+    if check_auth(&state.auth, &headers) != StatusCode::OK {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ActionResponse {
+                ok: false,
+                message: "unauthorized".into(),
+            }),
+        ));
+    }
     state
         .engine
         .flush()
@@ -304,7 +314,17 @@ pub async fn admin_flush(
 
 pub async fn admin_gc(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ActionResponse>)> {
+    if check_auth(&state.auth, &headers) != StatusCode::OK {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ActionResponse {
+                ok: false,
+                message: "unauthorized".into(),
+            }),
+        ));
+    }
     state
         .engine
         .trigger_gc()
@@ -328,7 +348,17 @@ pub async fn admin_gc(
 
 pub async fn admin_compact(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ActionResponse>)> {
+    if check_auth(&state.auth, &headers) != StatusCode::OK {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ActionResponse {
+                ok: false,
+                message: "unauthorized".into(),
+            }),
+        ));
+    }
     state
         .engine
         .trigger_compaction()
@@ -352,8 +382,18 @@ pub async fn admin_compact(
 
 pub async fn admin_query(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<QueryParams>,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ActionResponse>)> {
+    if check_auth(&state.auth, &headers) != StatusCode::OK {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ActionResponse {
+                ok: false,
+                message: "unauthorized".into(),
+            }),
+        ));
+    }
     let db_query = build_query(&params);
     let results = state.engine.query(db_query).await.map_err(|e| {
         (
@@ -381,8 +421,18 @@ pub async fn admin_query(
 
 pub async fn admin_delete(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<PatchRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ActionResponse>)> {
+    if check_auth(&state.auth, &headers) != StatusCode::OK {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ActionResponse {
+                ok: false,
+                message: "unauthorized".into(),
+            }),
+        ));
+    }
     state
         .engine
         .delete_batch(&[(req.key.clone(), req.ts)])
@@ -406,8 +456,18 @@ pub async fn admin_delete(
 
 pub async fn admin_patch(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<PatchRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, Json<ActionResponse>)> {
+    if check_auth(&state.auth, &headers) != StatusCode::OK {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ActionResponse {
+                ok: false,
+                message: "unauthorized".into(),
+            }),
+        ));
+    }
     let new_value = if let Some(b64) = &req.value_base64 {
         Some(general_purpose::STANDARD.decode(b64).map_err(|e| {
             (

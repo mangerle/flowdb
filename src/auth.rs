@@ -68,4 +68,32 @@ mod tests {
         let auth = AuthState::new(vec!["secret123".to_string()]);
         assert!(!auth.check(&HeaderMap::new(), None));
     }
+
+    #[test]
+    fn test_auth_is_enabled_true_when_keys_set() {
+        let auth = AuthState::new(vec!["key".to_string()]);
+        assert!(auth.is_enabled());
+    }
+
+    #[test]
+    fn test_auth_via_query_key() {
+        // Provide the API key via the URL query parameter instead of header.
+        let auth = AuthState::new(vec!["query-secret".to_string()]);
+        assert!(auth.check(&HeaderMap::new(), Some("query-secret")));
+    }
+
+    #[test]
+    fn test_auth_invalid_query_key() {
+        let auth = AuthState::new(vec!["query-secret".to_string()]);
+        assert!(!auth.check(&HeaderMap::new(), Some("wrong")));
+    }
+
+    #[test]
+    fn test_auth_header_takes_precedence_over_query_key() {
+        let auth = AuthState::new(vec!["header-secret".to_string()]);
+        let mut headers = HeaderMap::new();
+        headers.insert("X-API-Key", "header-secret".parse().unwrap());
+        // Header has correct key, query has wrong — should still pass.
+        assert!(auth.check(&headers, Some("wrong")));
+    }
 }

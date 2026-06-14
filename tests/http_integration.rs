@@ -253,3 +253,268 @@ async fn test_http_query_time_range() {
     assert_eq!(json["count"], 1);
     drop(engine);
 }
+
+/// Helper: build a POST request to the given URI with optional JSON body
+/// and optional `X-API-Key` header.
+fn admin_request(
+    uri: &str,
+    body: Option<serde_json::Value>,
+    api_key: Option<&str>,
+) -> Request<Body> {
+    // admin_query is GET, all others are POST.
+    let is_get = uri.starts_with("/admin/query");
+    let mut builder = if is_get {
+        Request::builder().method(Method::GET).uri(uri)
+    } else {
+        Request::builder().method(Method::POST).uri(uri)
+    };
+    if let Some(key) = api_key {
+        builder = builder.header("X-API-Key", key);
+    }
+    if let Some(b) = body {
+        builder
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&b).unwrap()))
+            .unwrap()
+    } else {
+        builder.body(Body::empty()).unwrap()
+    }
+}
+
+/// Every admin mutation endpoint must reject the request with 401 WHEN
+/// API keys are configured and none is provided.
+#[tokio::test]
+async fn test_admin_endpoints_require_auth_when_keys_set() {
+    let (app, engine) = setup_with_auth(vec!["secret".into()]).await;
+
+    // flush
+    let req = admin_request("/admin/flush", None, None);
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "/admin/flush without key"
+    );
+
+    // gc
+    let req = admin_request("/admin/gc", None, None);
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "/admin/gc without key"
+    );
+
+    // compact
+    let req = admin_request("/admin/compact", None, None);
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "/admin/compact without key"
+    );
+
+    // query
+    let req = admin_request("/admin/query?prefix=test", None, None);
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "/admin/query without key"
+    );
+
+    // delete
+    let body = serde_json::json!({"key": "x", "ts": 1});
+    let req = admin_request("/admin/delete", Some(body), None);
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "/admin/delete without key"
+    );
+
+    // patch
+    let body = serde_json::json!({"key": "x", "ts": 1, "value": "aGVsbG8="});
+    let req = admin_request("/admin/patch", Some(body), None);
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "/admin/patch without key"
+    );
+
+    drop(engine);
+}
+
+/// Every admin endpoint must ACCEPT the request with a valid API key.
+#[tokio::test]
+async fn test_admin_endpoints_accept_valid_key() {
+    let key = "s3cret-key";
+    let (app, engine) = setup_with_auth(vec![key.into()]).await;
+
+    // Write some data so flush / query / delete / patch have something to
+    // work with.
+    engine
+        .write_batch(&[Record {
+            key: b"admin_test".to_vec(),
+            ts: 100,
+            expire_at: i64::MAX,
+            value: vec![1, 2, 3],
+        }])
+        .await
+        .unwrap();
+
+    // flush
+    let req = admin_request("/admin/flush", None, Some(key));
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "/admin/flush with valid key"
+    );
+
+    // gc
+    let req = admin_request("/admin/gc", None, Some(key));
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "/admin/gc with valid key"
+    );
+
+    // compact
+    let req = admin_request("/admin/compact", None, Some(key));
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "/admin/compact with valid key"
+    );
+
+    // query (GET)
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/admin/query?prefix=admin_test")
+        .header("X-API-Key", key)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "/admin/query with valid key"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 1, "query should find the test record");
+
+    // patch (before delete — needs record to exist)
+    let body = serde_json::json!({"key": "admin_test", "ts": 100, "value": "d29ybGQ="});
+    let req = admin_request("/admin/patch", Some(body), Some(key));
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "/admin/patch with valid key"
+    );
+
+    // delete
+    let body = serde_json::json!({"key": "admin_test", "ts": 100});
+    let req = admin_request("/admin/delete", Some(body), Some(key));
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "/admin/delete with valid key"
+    );
+
+    drop(engine);
+}
+
+/// An incorrect API key must be rejected (NOT the same as no key).
+#[tokio::test]
+async fn test_admin_endpoints_reject_wrong_key() {
+    let (app, engine) = setup_with_auth(vec!["correct".into()]).await;
+
+    let req = admin_request("/admin/flush", None, Some("wrong"));
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "/admin/flush with wrong key"
+    );
+
+    let req = admin_request("/admin/gc", None, Some("wrong"));
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "/admin/gc with wrong key"
+    );
+
+    drop(engine);
+}
+
+/// When no API keys are configured (auth disabled), all admin endpoints
+/// must work WITHOUT any key header.
+#[tokio::test]
+async fn test_admin_endpoints_work_without_auth_when_disabled() {
+    let (app, engine) = setup().await;
+
+    engine
+        .write_batch(&[Record {
+            key: b"noauth".to_vec(),
+            ts: 1,
+            expire_at: i64::MAX,
+            value: vec![1],
+        }])
+        .await
+        .unwrap();
+
+    let req = admin_request("/admin/flush", None, None);
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = admin_request("/admin/gc", None, None);
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = admin_request("/admin/compact", None, None);
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/admin/query?prefix=noauth")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    drop(engine);
+}
+
+/// The admin HTML page must never require auth — it is just a static
+/// frontend that cannot do anything without the data endpoints.
+#[tokio::test]
+async fn test_admin_page_always_public() {
+    // With auth enabled
+    let (app, _engine) = setup_with_auth(vec!["key".into()]).await;
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/admin")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Without auth
+    let (app, _engine) = setup().await;
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/admin")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
