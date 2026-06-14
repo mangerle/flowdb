@@ -245,9 +245,9 @@ fn fuzz_udp_frame_encode_decode() {
             },
             value: value.clone(),
         };
-        let encoded = flowdb::udp::encode_frame(&[rec]);
+        let encoded = flowdb::udp::encode_frame(&[rec], None);
 
-        match flowdb::udp::decode_frame(&encoded) {
+        match flowdb::udp::decode_frame(&encoded, None) {
             Ok(decoded) => {
                 assert_eq!(decoded.len(), 1);
                 assert_eq!(decoded[0].key, key.into_bytes());
@@ -459,8 +459,8 @@ fn fuzz_udp_batch_frame() {
             continue;
         }
 
-        let encoded = flowdb::udp::encode_frame(&records);
-        match flowdb::udp::decode_frame(&encoded) {
+        let encoded = flowdb::udp::encode_frame(&records, None);
+        match flowdb::udp::decode_frame(&encoded, None) {
             Ok(decoded) => {
                 assert_eq!(
                     decoded.len(),
@@ -498,7 +498,7 @@ fn fuzz_udp_corrupt_frame() {
         expire_at: i64::MAX,
         value: b"val".to_vec(),
     };
-    let mut frame = flowdb::udp::encode_frame(&[rec]);
+    let mut frame = flowdb::udp::encode_frame(&[rec], None);
 
     for seed in 0..1000 {
         let data = generate_seed_data(seed);
@@ -515,7 +515,7 @@ fn fuzz_udp_corrupt_frame() {
             continue;
         }
 
-        let _ = flowdb::udp::decode_frame(&frame);
+        let _ = flowdb::udp::decode_frame(&frame, None);
         frame[corrupt_pos] ^= flip;
     }
 }

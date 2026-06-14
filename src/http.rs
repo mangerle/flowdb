@@ -196,7 +196,7 @@ pub async fn write_binary(
         ));
     }
 
-    let records = crate::udp::decode_frame(&body).map_err(|e| {
+    let records = crate::udp::decode_frame(&body, None).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             Json(ActionResponse {

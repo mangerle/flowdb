@@ -2,17 +2,40 @@ use crate::engine::Engine;
 use crate::error::{FlowError, Result};
 use crate::record::Record;
 use crate::stats::StatsCounters;
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::hash::Hasher;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 
 const MAGIC: u8 = 0x54;
-const VERSION: u8 = 0x01;
+const VERSION_V1: u8 = 0x01;
+const VERSION_V2: u8 = 0x02;
 const TTL_NONE: u32 = 0;
 
 /// Hard cap on key/value lengths to prevent pathological allocations.
 const MAX_KEY_BYTES: usize = 4096;
 const MAX_VAL_BYTES: usize = 64 * 1024;
+
+/// 8-byte SipHash-based authentication tag for V2 frames.
+const AUTH_HASH_BYTES: usize = 8;
+
+/// Compute an 8-byte authentication tag over `count` (2 bytes big-endian)
+/// and the record payload. Uses SipHash-1-3 with a fixed seed distinct from
+/// the bloom-filter seed.
+fn compute_auth_tag(api_key: &str, count: u16, records_payload: &[u8]) -> [u8; AUTH_HASH_BYTES] {
+    const SEED_K0: u64 = 0x5550_445f_4155_5448;
+    const SEED_K1: u64 = 0x464c_4f57_4442_4b45;
+
+    let mut h = std::hash::DefaultHasher::new();
+    h.write_u64(SEED_K0);
+    h.write_u64(SEED_K1);
+    h.write(api_key.as_bytes());
+    h.write(&count.to_be_bytes());
+    h.write(records_payload);
+    let hash = h.finish();
+    hash.to_be_bytes()
+}
 
 /// Reads 2 bytes at `pos` as big-endian u16. Returns `None` if out of bounds.
 /// Conversion uses `data[pos..pos+2].try_into().unwrap()` — the bounds check
@@ -99,24 +122,59 @@ fn read_record(data: &[u8], mut pos: usize) -> Option<(Record, usize)> {
 }
 
 /// Decodes a UDP frame containing one or more records (big-endian binary format).
-/// Frame layout: magic(1) | version(1) | count(2) | records...
-pub fn decode_frame(data: &[u8]) -> Result<Vec<Record>> {
+///
+/// Frame layout:
+///   V1: magic(1) | version=0x01(1) | count(2) | records...
+///   V2: magic(1) | version=0x02(1) | count(2) | auth_tag(8) | records...
+///
+/// When `api_key` is `Some`, V1 frames are rejected and V2 frames must
+/// carry a valid auth tag. When `api_key` is `None`, only V1 frames are
+/// accepted (backward-compatible with pre-auth clients).
+pub fn decode_frame(data: &[u8], api_key: Option<&str>) -> Result<Vec<Record>> {
     if data.len() < 4 {
         return Err(FlowError::Other("frame too short".into()));
     }
     if data[0] != MAGIC {
         return Err(FlowError::Other(format!("invalid magic: {:#x}", data[0])));
     }
-    if data[1] != VERSION {
-        return Err(FlowError::Other(format!(
-            "unsupported version: {}",
-            data[1]
-        )));
-    }
+    let version = data[1];
     let (raw_count, mut pos) = read_u16(data, 2).unwrap();
-    // Cap declared record count to prevent amplification attacks.
-    // The existing bounds checks in read_record handle actual data truncation.
     let count = (raw_count as usize).min(1024);
+
+    match (version, api_key) {
+        (VERSION_V1, None) => {
+            // Unauthenticated path — no key required, no auth tag in frame.
+        }
+        (VERSION_V1, Some(_)) => {
+            return Err(FlowError::Other(
+                "authentication required; upgrade client to V2 protocol".into(),
+            ));
+        }
+        (VERSION_V2, Some(key)) => {
+            if data.len() < pos + AUTH_HASH_BYTES {
+                return Err(FlowError::Other("frame too short for v2 auth tag".into()));
+            }
+            let received_tag: [u8; AUTH_HASH_BYTES] =
+                data[pos..pos + AUTH_HASH_BYTES].try_into().unwrap();
+            pos += AUTH_HASH_BYTES;
+
+            let expected_tag = compute_auth_tag(key, raw_count, &data[pos..]);
+            if received_tag != expected_tag {
+                return Err(FlowError::Other("authentication failed: invalid key hash".into()));
+            }
+        }
+        (VERSION_V2, None) => {
+            return Err(FlowError::Other(
+                "v2 frame received but server has no api_key configured".into(),
+            ));
+        }
+        _ => {
+            return Err(FlowError::Other(format!(
+                "unsupported version: {}",
+                data[1]
+            )));
+        }
+    }
 
     let mut records = Vec::with_capacity(count);
     for _ in 0..count {
@@ -130,12 +188,29 @@ pub fn decode_frame(data: &[u8]) -> Result<Vec<Record>> {
 }
 
 /// Encodes records into a UDP frame (big-endian binary format).
-/// Each record: key_len(2) | key | ts(8) | ttl(4) | val_len(2) | value
-pub fn encode_frame(records: &[Record]) -> Vec<u8> {
+///
+/// When `api_key` is `Some`, produces a V2 frame with an 8-byte
+/// authentication tag. When `None`, produces a legacy V1 frame.
+pub fn encode_frame(records: &[Record], api_key: Option<&str>) -> Vec<u8> {
     let mut buf = Vec::with_capacity(64 * records.len());
     buf.push(MAGIC);
-    buf.push(VERSION);
-    buf.extend_from_slice(&(records.len() as u16).to_be_bytes());
+
+    let version = if api_key.is_some() {
+        VERSION_V2
+    } else {
+        VERSION_V1
+    };
+    buf.push(version);
+
+    let count = records.len() as u16;
+    buf.extend_from_slice(&count.to_be_bytes());
+
+    // For V2: reserve space for the auth tag and fill the records section.
+    // We will compute the tag afterward.
+    let auth_pos = if api_key.is_some() { Some(buf.len()) } else { None };
+    if let Some(_) = auth_pos {
+        buf.extend_from_slice(&[0u8; AUTH_HASH_BYTES]);
+    }
 
     for rec in records {
         let key_bytes = &rec.key;
@@ -154,7 +229,44 @@ pub fn encode_frame(records: &[Record]) -> Vec<u8> {
         buf.extend_from_slice(&rec.value);
     }
 
+    // Compute and write the auth tag for V2 frames.
+    if let (Some(pos), Some(key)) = (auth_pos, api_key) {
+        let tag = compute_auth_tag(key, count, &buf[pos + AUTH_HASH_BYTES..]);
+        buf[pos..pos + AUTH_HASH_BYTES].copy_from_slice(&tag);
+    }
+
     buf
+}
+
+/// Simple per-IP token bucket for UDP rate limiting. Tokens refill at
+/// `rate_per_sec` (max burst = rate_per_sec). `try_consume` returns true
+/// if a token was available.
+struct TokenBucket {
+    tokens: f64,
+    last_refill: std::time::Instant,
+    rate: f64,
+}
+
+impl TokenBucket {
+    fn new(rate_per_sec: u32) -> Self {
+        Self {
+            tokens: rate_per_sec as f64,
+            last_refill: std::time::Instant::now(),
+            rate: rate_per_sec as f64,
+        }
+    }
+
+    fn try_consume(&mut self, now: std::time::Instant) -> bool {
+        let elapsed = (now - self.last_refill).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.rate).min(self.rate);
+        self.last_refill = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 pub async fn start_udp_listener(
@@ -162,17 +274,36 @@ pub async fn start_udp_listener(
     stats: Arc<StatsCounters>,
     addr: SocketAddr,
     max_packet_size: usize,
+    api_key: Option<String>,
+    rate_limit_per_ip: u32,
 ) -> Result<()> {
     let socket = UdpSocket::bind(addr).await?;
     let mut buf = vec![0u8; max_packet_size];
+    let mut rate_limits: HashMap<IpAddr, TokenBucket> = HashMap::new();
 
     loop {
         match socket.recv_from(&mut buf).await {
-            Ok((len, _src)) => {
+            Ok((len, src)) => {
+                let now = std::time::Instant::now();
+
+                // Per-IP rate limiting
+                if rate_limit_per_ip > 0 {
+                    let ip = src.ip();
+                    let bucket = rate_limits
+                        .entry(ip)
+                        .or_insert_with(|| TokenBucket::new(rate_limit_per_ip));
+                    if !bucket.try_consume(now) {
+                        stats
+                            .udp_packets_dropped
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    }
+                }
+
                 stats
                     .udp_packets_received
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                match decode_frame(&buf[..len]) {
+                match decode_frame(&buf[..len], api_key.as_deref()) {
                     Ok(records) => {
                         if let Err(e) = engine.write_batch(&records).await {
                             tracing::warn!("UDP write error: {}", e);
@@ -205,8 +336,8 @@ mod tests {
             expire_at: 1234567890 + 3600 * 1_000_000,
             value: b"hello".to_vec(),
         };
-        let encoded = encode_frame(std::slice::from_ref(&rec));
-        let decoded = decode_frame(&encoded).unwrap();
+        let encoded = encode_frame(std::slice::from_ref(&rec), None);
+        let decoded = decode_frame(&encoded, None).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].key, b"test-key");
         assert_eq!(decoded[0].ts, 1234567890);
@@ -222,8 +353,8 @@ mod tests {
             expire_at: i64::MAX,
             value: b"val".to_vec(),
         };
-        let encoded = encode_frame(&[rec]);
-        let decoded = decode_frame(&encoded).unwrap();
+        let encoded = encode_frame(&[rec], None);
+        let decoded = decode_frame(&encoded, None).unwrap();
         assert_eq!(decoded[0].expire_at, i64::MAX);
     }
 
@@ -243,8 +374,8 @@ mod tests {
                 value: b"v2".to_vec(),
             },
         ];
-        let encoded = encode_frame(&recs);
-        let decoded = decode_frame(&encoded).unwrap();
+        let encoded = encode_frame(&recs, None);
+        let decoded = decode_frame(&encoded, None).unwrap();
         assert_eq!(decoded.len(), 2);
         assert_eq!(decoded[0].key, b"a");
         assert_eq!(decoded[1].key, b"b");
@@ -258,15 +389,15 @@ mod tests {
             expire_at: i64::MAX,
             value: b"val".to_vec(),
         };
-        let mut encoded = encode_frame(&[rec]);
+        let mut encoded = encode_frame(&[rec], None);
         encoded[0] = 0x00;
-        assert!(decode_frame(&encoded).is_err());
+        assert!(decode_frame(&encoded, None).is_err());
     }
 
     #[test]
     fn test_decode_truncated() {
-        assert!(decode_frame(&[MAGIC, VERSION]).is_err());
-        assert!(decode_frame(&[MAGIC, VERSION, 0x00, 0x01]).is_err());
+        assert!(decode_frame(&[MAGIC, VERSION_V1], None).is_err());
+        assert!(decode_frame(&[MAGIC, VERSION_V1, 0x00, 0x01], None).is_err());
     }
 
     #[test]

@@ -66,7 +66,16 @@ async fn main() {
     let max_udp = server_config.max_udp_packet_size;
 
     let udp_handle = tokio::spawn(async move {
-        if let Err(e) = start_udp_listener(udp_engine, udp_stats, udp_addr, max_udp).await {
+        if let Err(e) = start_udp_listener(
+            udp_engine,
+            udp_stats,
+            udp_addr,
+            max_udp,
+            server_config.udp_api_key.clone(),
+            10000,
+        )
+        .await
+        {
             tracing::error!("UDP listener error: {}", e);
         }
     });
