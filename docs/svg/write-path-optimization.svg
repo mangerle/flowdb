@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 500" font-family="'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7f8c8d"/>
+    </marker>
+    <marker id="arrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#e74c3c"/>
+    </marker>
+    <marker id="arrG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#27ae60"/>
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="450" y="30" text-anchor="middle" font-size="18" font-weight="700" fill="#2c3e50">写入路径优化：BTreeMap → Vec</text>
+  <text x="450" y="48" text-anchor="middle" font-size="11" fill="#7f8c8d">将排序从热路径（每次写入）移到冷路径（freeze 时一次性）</text>
+
+  <!-- ====== Left: BTreeMap (v0.1.5) ====== -->
+  <rect x="30" y="65" width="390" height="410" rx="12" fill="#fdf2f2" stroke="#e74c3c" stroke-width="2"/>
+  <rect x="30" y="65" width="390" height="36" rx="12" fill="#e74c3c"/>
+  <text x="225" y="88" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">BTreeMap 方案 (v0.1.5)</text>
+
+  <!-- Step 1: clone key -->
+  <rect x="55" y="115" width="340" height="44" rx="8" fill="#fadbd8" stroke="#e74c3c"/>
+  <text x="70" y="133" font-size="12" fill="#922b21" font-weight="600">Step 1: clone key (每条记录)</text>
+  <text x="70" y="151" font-size="10" fill="#7f8c8d">rec.key.clone() → malloc + memcpy (128B)</text>
+  <rect x="320" y="125" width="60" height="24" rx="4" fill="#e74c3c"/>
+  <text x="350" y="140" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">O(1) + alloc</text>
+
+  <line x1="225" y1="159" x2="225" y2="175" stroke="#e74c3c" stroke-width="2" marker-end="url(#arrR)"/>
+
+  <!-- Step 2: tree insert -->
+  <rect x="55" y="178" width="340" height="52" rx="8" fill="#fadbd8" stroke="#e74c3c"/>
+  <text x="70" y="196" font-size="12" fill="#922b21" font-weight="600">Step 2: BTreeMap::insert</text>
+  <text x="70" y="212" font-size="10" fill="#7f8c8d">树遍历比较 key → 插入节点 → 可能触发节点分裂</text>
+  <text x="70" y="224" font-size="10" fill="#7f8c8d">每次比较: memcmp(key1, key2)</text>
+  <rect x="310" y="190" width="70" height="24" rx="4" fill="#e74c3c"/>
+  <text x="345" y="205" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">O(log n)</text>
+
+  <line x1="225" y1="230" x2="225" y2="246" stroke="#e74c3c" stroke-width="2" marker-end="url(#arrR)"/>
+
+  <!-- Step 3: done -->
+  <rect x="55" y="249" width="340" height="36" rx="8" fill="#fadbd8" stroke="#e74c3c"/>
+  <text x="70" y="271" font-size="12" fill="#922b21" font-weight="600">结果: 已排序，查询 O(log n)</text>
+
+  <!-- BTreeMap visualization -->
+  <text x="225" y="310" text-anchor="middle" font-size="10" fill="#7f8c8d" font-style="italic">BTreeMap 结构示意（每次插入保持有序）</text>
+  <rect x="185" y="318" width="80" height="28" rx="4" fill="#f5b7b1" stroke="#e74c3c"/>
+  <text x="225" y="336" text-anchor="middle" font-size="9" fill="#922b21">key=50</text>
+  
+  <rect x="125" y="356" width="60" height="24" rx="4" fill="#f5b7b1" stroke="#e74c3c"/>
+  <text x="155" y="372" text-anchor="middle" font-size="8" fill="#922b21">key=30</text>
+  <rect x="265" y="356" width="60" height="24" rx="4" fill="#f5b7b1" stroke="#e74c3c"/>
+  <text x="295" y="372" text-anchor="middle" font-size="8" fill="#922b21">key=70</text>
+
+  <line x1="205" y1="346" x2="170" y2="356" stroke="#e74c3c" stroke-width="1"/>
+  <line x1="245" y1="346" x2="280" y2="356" stroke="#e74c3c" stroke-width="1"/>
+
+  <!-- Inserting key=55 (needs comparison) -->
+  <rect x="85" y="395" width="280" height="30" rx="6" fill="#fcf3cf" stroke="#f1c40f"/>
+  <text x="225" y="414" text-anchor="middle" font-size="10" fill="#7d6608">插入 key=55: 50→右→70→左→插入 (3次比较)</text>
+
+  <!-- Cost summary -->
+  <rect x="55" y="438" width="340" height="28" rx="6" fill="#e74c3c" opacity="0.1"/>
+  <text x="225" y="456" text-anchor="middle" font-size="11" fill="#c0392b" font-weight="700">100K 条写入 = 100K 次 clone + 100K 次 tree insert</text>
+
+  <!-- ====== Right: Vec (v0.2.2) ====== -->
+  <rect x="480" y="65" width="390" height="410" rx="12" fill="#eafaf1" stroke="#2ecc71" stroke-width="2"/>
+  <rect x="480" y="65" width="390" height="36" rx="12" fill="#2ecc71"/>
+  <text x="675" y="88" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">Vec 方案 (v0.2.2+)</text>
+
+  <!-- Step 1: push -->
+  <rect x="505" y="115" width="340" height="44" rx="8" fill="#d4efdf" stroke="#27ae60"/>
+  <text x="520" y="133" font-size="12" fill="#1e7e34" font-weight="600">Step 1: push (移动语义，零拷贝)</text>
+  <text x="520" y="151" font-size="10" fill="#7f8c8d">active.push(rec) → 直接追加到 Vec 尾部</text>
+  <rect x="770" y="125" width="60" height="24" rx="4" fill="#27ae60"/>
+  <text x="800" y="140" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">O(1) 摊还</text>
+
+  <line x1="675" y1="159" x2="675" y2="175" stroke="#27ae60" stroke-width="2" marker-end="url(#arrG)"/>
+
+  <!-- Step 2: done -->
+  <rect x="505" y="178" width="340" height="36" rx="8" fill="#d4efdf" stroke="#27ae60"/>
+  <text x="520" y="200" font-size="12" fill="#1e7e34" font-weight="600">结果: 未排序，查询 O(n) 线性扫描</text>
+
+  <line x1="675" y1="214" x2="675" y2="232" stroke="#27ae60" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#arrG)"/>
+
+  <!-- Freeze: sort -->
+  <rect x="505" y="235" width="340" height="52" rx="8" fill="#ebdef0" stroke="#8e44ad"/>
+  <text x="520" y="253" font-size="12" fill="#6c3483" font-weight="600">freeze() 时: sort_by() 原地排序</text>
+  <text x="520" y="269" font-size="10" fill="#7f8c8d">一次性排序整个 Vec → swap 到 frozen BTreeMap</text>
+  <text x="520" y="281" font-size="10" fill="#7f8c8d">仅在 memtable 满时触发（冷路径）</text>
+  <rect x="760" y="247" width="70" height="24" rx="4" fill="#8e44ad"/>
+  <text x="795" y="262" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">O(n log n)</text>
+
+  <!-- Vec visualization -->
+  <text x="675" y="315" text-anchor="middle" font-size="10" fill="#7f8c8d" font-style="italic">Vec 结构示意（push 追加到尾部，不排序）</text>
+  
+  <rect x="520" y="325" width="50" height="28" rx="4" fill="#abebc6" stroke="#27ae60"/>
+  <text x="545" y="343" text-anchor="middle" font-size="9" fill="#145a32">30</text>
+  <rect x="572" y="325" width="50" height="28" rx="4" fill="#abebc6" stroke="#27ae60"/>
+  <text x="597" y="343" text-anchor="middle" font-size="9" fill="#145a32">70</text>
+  <rect x="624" y="325" width="50" height="28" rx="4" fill="#abebc6" stroke="#27ae60"/>
+  <text x="649" y="343" text-anchor="middle" font-size="9" fill="#145a32">50</text>
+  <rect x="676" y="325" width="50" height="28" rx="4" fill="#abebc6" stroke="#27ae60"/>
+  <text x="701" y="343" text-anchor="middle" font-size="9" fill="#145a32">20</text>
+  <rect x="728" y="325" width="50" height="28" rx="4" fill="#d5f5e3" stroke="#27ae60" stroke-dasharray="3,2"/>
+  <text x="753" y="343" text-anchor="middle" font-size="9" fill="#27ae60">55</text>
+  <text x="785" y="343" font-size="9" fill="#27ae60">← push</text>
+
+  <!-- After freeze -->
+  <text x="675" y="375" text-anchor="middle" font-size="10" fill="#8e44ad" font-style="italic">freeze() 后一次性排序: [20, 30, 50, 55, 70]</text>
+
+  <!-- Cost summary -->
+  <rect x="505" y="395" width="340" height="36" rx="6" fill="#27ae60" opacity="0.1"/>
+  <text x="675" y="411" text-anchor="middle" font-size="11" fill="#1e7e34" font-weight="700">100K 条写入 = 100K 次 push (O(1))</text>
+  <text x="675" y="425" text-anchor="middle" font-size="10" fill="#7f8c8d">+ 1 次 sort (O(n log n))，仅在 freeze 时</text>
+
+  <!-- Key insight -->
+  <rect x="505" y="438" width="340" height="28" rx="6" fill="#fef9e7" stroke="#f39c12"/>
+  <text x="675" y="456" text-anchor="middle" font-size="10" fill="#7d6608" font-weight="600">写入快 2.25x · 查询稍慢但可接受（命中 SSTable）</text>
+</svg>

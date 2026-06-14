@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 480" font-family="'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+
+  <!-- Title -->
+  <text x="440" y="30" text-anchor="middle" font-size="18" font-weight="700" fill="#2c3e50">Async 审计：12 个 async 方法中 8 个是"假 async"</text>
+  <text x="440" y="48" text-anchor="middle" font-size="11" fill="#7f8c8d">函数体内无 .await、无 spawn_blocking — async 关键字纯属多余</text>
+
+  <!-- ====== Left: "Fake async" methods (8) ====== -->
+  <rect x="30" y="65" width="390" height="395" rx="12" fill="#fef9e7" stroke="#f39c12" stroke-width="2"/>
+  <rect x="30" y="65" width="390" height="36" rx="12" fill="#f39c12"/>
+  <text x="225" y="88" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">假 async (8 个) — 无 .await</text>
+
+  <!-- open -->
+  <rect x="50" y="115" width="170" height="40" rx="6" fill="#fadbd8" stroke="#e74c3c"/>
+  <text x="135" y="132" text-anchor="middle" font-size="11" fill="#922b21" font-weight="600">open()</text>
+  <text x="135" y="147" text-anchor="middle" font-size="9" fill="#7f8c8d">纯 std::fs 操作</text>
+
+  <!-- query -->
+  <rect x="230" y="115" width="170" height="40" rx="6" fill="#fadbd8" stroke="#e74c3c"/>
+  <text x="315" y="132" text-anchor="middle" font-size="11" fill="#922b21" font-weight="600">query()</text>
+  <text x="315" y="147" text-anchor="middle" font-size="9" fill="#7f8c8d">ScanIterator::build + collect</text>
+
+  <!-- 5x query_* -->
+  <rect x="50" y="165" width="170" height="40" rx="6" fill="#fadbd8" stroke="#e74c3c"/>
+  <text x="135" y="182" text-anchor="middle" font-size="11" fill="#922b21" font-weight="600">query_by_prefix()</text>
+  <text x="135" y="197" text-anchor="middle" font-size="9" fill="#7f8c8d">仅委托 query()</text>
+
+  <rect x="230" y="165" width="170" height="40" rx="6" fill="#fadbd8" stroke="#e74c3c"/>
+  <text x="315" y="182" text-anchor="middle" font-size="11" fill="#922b21" font-weight="600">query_by_key_range()</text>
+  <text x="315" y="197" text-anchor="middle" font-size="9" fill="#7f8c8d">仅委托 query()</text>
+
+  <rect x="50" y="215" width="170" height="40" rx="6" fill="#fadbd8" stroke="#e74c3c"/>
+  <text x="135" y="232" text-anchor="middle" font-size="11" fill="#922b21" font-weight="600">query_time_range()</text>
+  <text x="135" y="247" text-anchor="middle" font-size="9" fill="#7f8c8d">仅委托 query()</text>
+
+  <rect x="230" y="215" width="170" height="40" rx="6" fill="#fadbd8" stroke="#e74c3c"/>
+  <text x="315" y="232" text-anchor="middle" font-size="11" fill="#922b21" font-weight="600">query_prefix_time_range()</text>
+  <text x="315" y="247" text-anchor="middle" font-size="9" fill="#7f8c8d">仅委托 query()</text>
+
+  <rect x="50" y="265" width="170" height="40" rx="6" fill="#fadbd8" stroke="#e74c3c"/>
+  <text x="135" y="282" text-anchor="middle" font-size="11" fill="#922b21" font-weight="600">query_key_time_range()</text>
+  <text x="135" y="297" text-anchor="middle" font-size="9" fill="#7f8c8d">仅委托 query()</text>
+
+  <!-- get -->
+  <rect x="230" y="265" width="170" height="40" rx="6" fill="#fadbd8" stroke="#e74c3c"/>
+  <text x="315" y="282" text-anchor="middle" font-size="11" fill="#922b21" font-weight="600">get()</text>
+  <text x="315" y="297" text-anchor="middle" font-size="9" fill="#7f8c8d">已有 get_sync()，纯包装</text>
+
+  <!-- get_latest_async -->
+  <rect x="50" y="315" width="170" height="40" rx="6" fill="#fadbd8" stroke="#e74c3c"/>
+  <text x="135" y="332" text-anchor="middle" font-size="11" fill="#922b21" font-weight="600">get_latest_async()</text>
+  <text x="135" y="347" text-anchor="middle" font-size="9" fill="#7f8c8d">已有 get_latest()，纯包装</text>
+
+  <!-- shutdown -->
+  <rect x="230" y="315" width="170" height="40" rx="6" fill="#fadbd8" stroke="#e74c3c"/>
+  <text x="315" y="332" text-anchor="middle" font-size="11" fill="#922b21" font-weight="600">shutdown()</text>
+  <text x="315" y="347" text-anchor="middle" font-size="9" fill="#7f8c8d">handle.abort() + flush</text>
+
+  <!-- Diagnosis box -->
+  <rect x="50" y="370" width="350" height="78" rx="8" fill="#fef9e7" stroke="#f1c40f" stroke-width="1.5"/>
+  <text x="225" y="390" text-anchor="middle" font-size="11" fill="#7d6608" font-weight="700">诊断：async 关键字 → 编译器生成状态机</text>
+  <text x="225" y="408" text-anchor="middle" font-size="10" fill="#7f8c8d">每次调用经历 poll() → Pending/Ready 状态转换</text>
+  <text x="225" y="424" text-anchor="middle" font-size="10" fill="#7f8c8d">对于纳秒级操作 (get)，状态机开销占比显著</text>
+  <text x="225" y="440" text-anchor="middle" font-size="10" fill="#e74c3c" font-weight="600">用户还需要启动 tokio runtime 才能调用</text>
+
+  <!-- ====== Right: spawn_blocking methods (4) ====== -->
+  <rect x="460" y="65" width="390" height="395" rx="12" fill="#ebf5fb" stroke="#3498db" stroke-width="2"/>
+  <rect x="460" y="65" width="390" height="36" rx="12" fill="#3498db"/>
+  <text x="655" y="88" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">spawn_blocking 包装 (4 个)</text>
+
+  <!-- flush -->
+  <rect x="480" y="115" width="350" height="56" rx="6" fill="#d6eaf8" stroke="#3498db"/>
+  <text x="495" y="134" font-size="12" fill="#1a5276" font-weight="600">flush()</text>
+  <text x="495" y="150" font-size="9" fill="#7f8c8d">tokio::spawn_blocking(worker.lock().do_flush())</text>
+  <text x="495" y="164" font-size="9" fill="#7f8c8d">do_flush() 本身是同步的 — spawn_blocking 只是把同步操作丢到线程池</text>
+
+  <!-- trigger_gc -->
+  <rect x="480" y="181" width="350" height="56" rx="6" fill="#d6eaf8" stroke="#3498db"/>
+  <text x="495" y="200" font-size="12" fill="#1a5276" font-weight="600">trigger_gc()</text>
+  <text x="495" y="216" font-size="9" fill="#7f8c8d">tokio::spawn_blocking(gc.run())</text>
+  <text x="495" y="230" font-size="9" fill="#7f8c8d">gc.run() 本身是同步的 — std::fs::remove_file 操作</text>
+
+  <!-- trigger_compaction -->
+  <rect x="480" y="247" width="350" height="56" rx="6" fill="#d6eaf8" stroke="#3498db"/>
+  <text x="495" y="266" font-size="12" fill="#1a5276" font-weight="600">trigger_compaction()</text>
+  <text x="495" y="282" font-size="9" fill="#7f8c8d">tokio::spawn_blocking(compaction.run())</text>
+  <text x="495" y="296" font-size="9" fill="#7f8c8d">compaction.run() 本身是同步的 — heap merge + zstd 压缩</text>
+
+  <!-- close -->
+  <rect x="480" y="313" width="350" height="56" rx="6" fill="#d6eaf8" stroke="#3498db"/>
+  <text x="495" y="332" font-size="12" fill="#1a5276" font-weight="600">close()</text>
+  <text x="495" y="348" font-size="9" fill="#7f8c8d">tokio::spawn_blocking(worker.lock().do_flush + flush_wal)</text>
+  <text x="495" y="362" font-size="9" fill="#7f8c8d">与 shutdown() 逻辑相同，只是加了 spawn_blocking 包装</text>
+
+  <!-- Diagnosis box -->
+  <rect x="480" y="385" width="350" height="62" rx="8" fill="#eaf2f8" stroke="#3498db" stroke-width="1.5"/>
+  <text x="655" y="404" text-anchor="middle" font-size="11" fill="#1a5276" font-weight="700">诊断：操作本身是同步的</text>
+  <text x="655" y="420" text-anchor="middle" font-size="10" fill="#7f8c8d">spawn_blocking = "把同步操作丢到线程池"</text>
+  <text x="655" y="436" text-anchor="middle" font-size="10" fill="#2980b9" font-weight="600">→ 直接调用即可，不需要 async 包装</text>
+
+  <!-- ====== Bottom: Solution ====== -->
+  <rect x="120" y="455" width="640" height="22" rx="6" fill="#eafaf1" stroke="#27ae60"/>
+  <text x="440" y="470" text-anchor="middle" font-size="12" fill="#27ae60" font-weight="700">
+    解决方案：全部改为同步 fn · 后台维护改用 std::thread · 零 tokio 依赖
+  </text>
+</svg>

@@ -56,7 +56,7 @@ README 给出的结果是：
 
 可以把它理解为一个典型但很“瘦身”的 LSM 架构：
 
-![FlowDB 架构图](./flowdb-architecture.svg)
+![FlowDB 架构图](svg/flowdb-architecture.svg)
 
 核心思路可以概括成一句话：
 
