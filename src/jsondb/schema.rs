@@ -45,7 +45,7 @@ impl<'de> Deserialize<'de> for IndexDef {
             _ => {
                 return Err(D::Error::custom(
                     "key_paths must be a string or array of strings",
-                ))
+                ));
             }
         };
         if key_paths.is_empty() {
@@ -260,16 +260,14 @@ mod tests {
 
     #[test]
     fn test_index_def_deserialize_old_key_path_array() {
-        let json =
-            r#"{"name":"by_city_age","key_path":["city","age"],"unique":false,"multi_entry":false}"#;
+        let json = r#"{"name":"by_city_age","key_path":["city","age"],"unique":false,"multi_entry":false}"#;
         let idx: IndexDef = serde_json::from_str(json).unwrap();
         assert_eq!(idx.key_paths, vec!["city", "age"]);
     }
 
     #[test]
     fn test_index_def_deserialize_new_key_paths_array() {
-        let json =
-            r#"{"name":"by_city_age","key_paths":["city","age"],"unique":false,"multi_entry":false}"#;
+        let json = r#"{"name":"by_city_age","key_paths":["city","age"],"unique":false,"multi_entry":false}"#;
         let idx: IndexDef = serde_json::from_str(json).unwrap();
         assert_eq!(idx.key_paths, vec!["city", "age"]);
     }

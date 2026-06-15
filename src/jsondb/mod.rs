@@ -9,13 +9,13 @@ mod schema;
 use crate::engine::Engine;
 use crate::error::{FlowError, Result};
 use crate::jsondb::encoding::{
-    counter_key, decode_doc, doc_key, doc_prefix, encode_composite_value, encode_doc,
+    SEP, counter_key, decode_doc, doc_key, doc_prefix, encode_composite_value, encode_doc,
     encode_index_value, encode_primary_key, extract_field, idx_key, idx_prefix, idx_value_prefix,
-    prefix_range, SEP,
+    prefix_range,
 };
 use crate::jsondb::schema::{
-    load_schemas, schema_delete_record, schema_record, validate_index_def, validate_store_def,
-    IndexDef, Schema, StoreDef,
+    IndexDef, Schema, StoreDef, load_schemas, schema_delete_record, schema_record,
+    validate_index_def, validate_store_def,
 };
 use crate::record::{Config, InternalRecord, Record, ScanRange};
 use serde_json::Value;
@@ -38,31 +38,7 @@ pub enum TransactionMode {
 
 // ── JsonDB ───────────────────────────────────────────────────────
 
-/// A JSON document database built on top of a single FlowDB instance.
-///
-/// Every document operation is ACID — document writes and secondary-index
-/// updates are applied atomically.  Explicit [`Transaction`]s group multiple
-/// operations into a single atomic batch.
-///
-/// # Example
-///
-/// ```no_run
-/// use flowdb::jsondb::{JsonDB, TransactionMode};
-/// use serde_json::json;
-///
-/// let db = JsonDB::open(Default::default()).unwrap();
-/// db.create_object_store("users", "id").unwrap();
-/// db.create_index("users", "by_email", &["email"], true).unwrap();
-///
-/// db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
-/// let doc = db.get("users", &json!("u1")).unwrap();
-///
-/// let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
-/// tx.put("users", json!({"id": "u2", "email": "c@d.com"})).unwrap();
-/// tx.commit().unwrap();
-/// ```
-
-// ── KeyArg / Document traits ──────────────────────────────────────
+// ── KeyArg trait ──────────────────────────────────────────────────
 
 /// Trait for types that can be used as a primary key argument.
 ///
@@ -112,6 +88,29 @@ impl KeyArg for &Value {
     }
 }
 
+/// A JSON document database built on top of a single FlowDB instance.
+///
+/// Every document operation is ACID — document writes and secondary-index
+/// updates are applied atomically.  Explicit [`Transaction`]s group multiple
+/// operations into a single atomic batch.
+///
+/// # Example
+///
+/// ```no_run
+/// use flowdb::jsondb::{JsonDB, TransactionMode};
+/// use serde_json::json;
+///
+/// let db = JsonDB::open(Default::default()).unwrap();
+/// db.create_object_store("users", "id").unwrap();
+/// db.create_index("users", "by_email", &["email"], true).unwrap();
+///
+/// db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
+/// let doc = db.get("users", &json!("u1")).unwrap();
+///
+/// let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+/// tx.put("users", json!({"id": "u2", "email": "c@d.com"})).unwrap();
+/// tx.commit().unwrap();
+/// ```
 pub struct JsonDB {
     engine: Engine,
     schema: Schema,
@@ -144,7 +143,11 @@ impl JsonDB {
             let iter = engine.scan(range)?;
             iter.collect()
         })?;
-        Ok(Self { engine, schema, write_lock: std::sync::Mutex::new(()) })
+        Ok(Self {
+            engine,
+            schema,
+            write_lock: std::sync::Mutex::new(()),
+        })
     }
 
     /// Shut down the underlying engine.
@@ -183,7 +186,7 @@ impl JsonDB {
                     )));
                 }
                 // Already exists with identical definition – no-op.
-                return Ok(());
+                Ok(())
             }
             None => {
                 let entry = StoreDef {
@@ -208,10 +211,7 @@ impl JsonDB {
     pub fn delete_object_store(&self, name: &str) -> Result<()> {
         let def = self.schema.get(name);
         if def.is_none() {
-            return Err(FlowError::JsonDb(format!(
-                "store '{}' not found",
-                name
-            )));
+            return Err(FlowError::JsonDb(format!("store '{}' not found", name)));
         }
         let def = def.unwrap();
 
@@ -282,9 +282,8 @@ impl JsonDB {
             let doc = decode_doc(&rec?.value)?;
             let index_vals = extract_index_values(&doc, &index);
             for vals in index_vals {
-                let key_bytes = encode_primary_key(
-                    &extract_field(&doc, &def.key_path).unwrap_or(Value::Null),
-                )?;
+                let key_bytes =
+                    encode_primary_key(&extract_field(&doc, &def.key_path).unwrap_or(Value::Null))?;
                 let encoded = encode_composite_value(&vals);
                 records.push(InternalRecord::from_record(
                     &Record::new(
@@ -304,7 +303,13 @@ impl JsonDB {
 
     /// Convenience: create a single-field index.  Equivalent to
     /// `create_index(store, name, &[key_path], unique)`.
-    pub fn create_index_on(&self, store: &str, name: &str, key_path: &str, unique: bool) -> Result<()> {
+    pub fn create_index_on(
+        &self,
+        store: &str,
+        name: &str,
+        key_path: &str,
+        unique: bool,
+    ) -> Result<()> {
         self.create_index(store, name, &[key_path], unique)
     }
 
@@ -378,9 +383,7 @@ impl JsonDB {
             .get(store)
             .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", store)))?;
         let key_bytes = encode_primary_key(key)?;
-        let rec = self
-            .engine
-            .get_bytes(&doc_key(store, &key_bytes), 0);
+        let rec = self.engine.get_bytes(&doc_key(store, &key_bytes), 0);
         match rec {
             Some(r) => Ok(Some(decode_doc(&r.value)?)),
             None => Ok(None),
@@ -466,12 +469,7 @@ impl JsonDB {
     }
 
     /// Look up documents by an exact index value.
-    pub fn get_by_index(
-        &self,
-        store: &str,
-        index: &str,
-        value: &Value,
-    ) -> Result<Vec<Value>> {
+    pub fn get_by_index(&self, store: &str, index: &str, value: &Value) -> Result<Vec<Value>> {
         let _def = self
             .schema
             .get(store)
@@ -581,10 +579,7 @@ impl JsonDB {
         // Validate all stores exist.
         for name in stores {
             if self.schema.get(name).is_none() {
-                return Err(FlowError::JsonDb(format!(
-                    "store '{}' not found",
-                    name
-                )));
+                return Err(FlowError::JsonDb(format!("store '{}' not found", name)));
             }
         }
         Ok(Transaction {
@@ -712,10 +707,7 @@ impl<'db> Transaction<'db> {
         }
 
         // Fall back to engine.
-        let rec = self
-            .db
-            .engine
-            .get_bytes(&doc_key(store, &key_bytes), 0);
+        let rec = self.db.engine.get_bytes(&doc_key(store, &key_bytes), 0);
         match rec {
             Some(r) => Ok(Some(decode_doc(&r.value)?)),
             None => Ok(None),
@@ -727,8 +719,7 @@ impl<'db> Transaction<'db> {
         self.require_read_write()?;
         let _ = self.require_store(store)?;
         let key_bytes = encode_primary_key(key)?;
-        self.writes
-            .insert((store.to_string(), key_bytes), None);
+        self.writes.insert((store.to_string(), key_bytes), None);
         Ok(())
     }
 
@@ -742,11 +733,10 @@ impl<'db> Transaction<'db> {
             let rec = r?;
             // Skip if the doc has been deleted in our writes.
             let key_bytes = rec.key[doc_prefix(store).len()..].to_vec();
-            if let Some(doc_opt) = self.writes.get(&(store.to_string(), key_bytes)) {
-                if doc_opt.is_none() {
+            if let Some(doc_opt) = self.writes.get(&(store.to_string(), key_bytes))
+                && doc_opt.is_none() {
                     continue; // deleted
                 }
-            }
             count += 1;
         }
         // Add buffered puts that aren't in the engine yet.
@@ -758,12 +748,7 @@ impl<'db> Transaction<'db> {
                 continue;
             }
             // Check if it already was counted by the scan.
-            if self
-                .db
-                .engine
-                .get_bytes(&doc_key(store, k), 0)
-                .is_none()
-            {
+            if self.db.engine.get_bytes(&doc_key(store, k), 0).is_none() {
                 count += 1;
             }
         }
@@ -795,27 +780,16 @@ impl<'db> Transaction<'db> {
             if s != store {
                 continue;
             }
-            if let Some(bytes) = doc_opt {
-                if self
-                    .db
-                    .engine
-                    .get_bytes(&doc_key(store, k), 0)
-                    .is_none()
-                {
+            if let Some(bytes) = doc_opt
+                && self.db.engine.get_bytes(&doc_key(store, k), 0).is_none() {
                     docs.push(decode_doc(bytes)?);
                 }
-            }
         }
         Ok(docs)
     }
 
     /// Look up documents by exact index value within this transaction.
-    pub fn get_by_index(
-        &self,
-        store: &str,
-        index: &str,
-        value: &Value,
-    ) -> Result<Vec<Value>> {
+    pub fn get_by_index(&self, store: &str, index: &str, value: &Value) -> Result<Vec<Value>> {
         let def = self.require_store(store)?;
         let _ = def
             .indexes
@@ -869,7 +843,9 @@ impl<'db> Transaction<'db> {
                 let doc: Value = decode_doc(bytes)?;
                 if extract_field(&doc, first_path) == Some(value.clone()) {
                     // Avoid duplicates that were already returned from the engine scan.
-                    let already = docs.iter().any(|d| extract_field(d, &def.key_path) == extract_field(&doc, &def.key_path));
+                    let already = docs.iter().any(|d| {
+                        extract_field(d, &def.key_path) == extract_field(&doc, &def.key_path)
+                    });
                     if !already {
                         docs.push(doc);
                     }
@@ -918,19 +894,16 @@ impl<'db> Transaction<'db> {
             let rec = r?;
             let key_bytes = &rec.value;
             if let Some(doc_opt) = self.writes.get(&(store.to_string(), key_bytes.clone())) {
-                match doc_opt {
-                    Some(bytes) => {
-                        let buffered_doc = decode_doc(bytes)?;
-                        if let Some(index_val) = extract_field(&buffered_doc, &first_path) {
-                            let enc = encode_index_value(&index_val);
-                            if enc.as_slice() >= enc_start.as_slice()
-                                && enc.as_slice() < enc_end.as_slice()
-                            {
-                                docs.push(buffered_doc);
-                            }
+                if let Some(bytes) = doc_opt {
+                    let buffered_doc = decode_doc(bytes)?;
+                    if let Some(index_val) = extract_field(&buffered_doc, &first_path) {
+                        let enc = encode_index_value(&index_val);
+                        if enc.as_slice() >= enc_start.as_slice()
+                            && enc.as_slice() < enc_end.as_slice()
+                        {
+                            docs.push(buffered_doc);
                         }
                     }
-                    None => {}
                 }
             } else if let Some(doc) = self.db.engine.get_bytes(&doc_key(store, key_bytes), 0) {
                 docs.push(decode_doc(&doc.value)?);
@@ -954,8 +927,7 @@ impl<'db> Transaction<'db> {
                 let buffered_doc = decode_doc(bytes)?;
                 if let Some(index_val) = extract_field(&buffered_doc, &first_path) {
                     let enc = encode_index_value(&index_val);
-                    if enc.as_slice() >= enc_start.as_slice()
-                        && enc.as_slice() < enc_end.as_slice()
+                    if enc.as_slice() >= enc_start.as_slice() && enc.as_slice() < enc_end.as_slice()
                     {
                         docs.push(buffered_doc);
                     }
@@ -1013,15 +985,12 @@ impl<'db> Transaction<'db> {
         let mut records = Vec::new();
 
         // Include any pending counter updates (auto-increment).
-        records.extend(self.counter_updates.drain(..));
+        records.append(&mut self.counter_updates);
 
         // Process buffered document writes.
         for ((store_name, key_bytes), doc_opt) in &self.writes {
-            let def = self
-                .db
-                .schema
-                .get(store_name)
-                .ok_or_else(|| {
+            let def =
+                self.db.schema.get(store_name).ok_or_else(|| {
                     FlowError::JsonDb(format!("store '{}' not found", store_name))
                 })?;
 
@@ -1079,8 +1048,12 @@ impl<'db> Transaction<'db> {
                                 }
                                 // Also check other buffered writes in this transaction.
                                 for ((other_store, other_key), other_doc) in &self.writes {
-                                    if other_store != store_name { continue; }
-                                    if other_key == key_bytes { continue; }
+                                    if other_store != store_name {
+                                        continue;
+                                    }
+                                    if other_key == key_bytes {
+                                        continue;
+                                    }
                                     if let Some(other_bytes) = other_doc {
                                         let other_doc_val = decode_doc(other_bytes)?;
                                         let other_vals = extract_index_values(&other_doc_val, idx);
@@ -1112,11 +1085,7 @@ impl<'db> Transaction<'db> {
                 }
                 None => {
                     // Delete document.
-                    records.push(InternalRecord::delete(
-                        doc_key(store_name, key_bytes),
-                        0,
-                        0,
-                    ));
+                    records.push(InternalRecord::delete(doc_key(store_name, key_bytes), 0, 0));
                 }
             }
         }
@@ -1241,7 +1210,8 @@ impl<'a> QueryBuilder<'a> {
 
     /// Filter: field IN [...values].
     pub fn where_in(mut self, field: &str, values: Vec<Value>) -> Self {
-        self.filters.push(QueryFilter::In(field.to_string(), values));
+        self.filters
+            .push(QueryFilter::In(field.to_string(), values));
         self
     }
 
@@ -1277,8 +1247,7 @@ impl<'a> QueryBuilder<'a> {
             .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", self.store)))?;
 
         // 1. Find best matching index and compute scan range
-        let (scan_result, used_index) =
-            self.plan_scan(&store_def);
+        let (scan_result, used_index) = self.plan_scan(&store_def);
 
         // Determine whether an in-memory sort is needed (after the scan,
         // before offset/limit).  This also controls early-termination in
@@ -1303,7 +1272,11 @@ impl<'a> QueryBuilder<'a> {
         let limit_target = self.limit.map(|l| l + self.offset);
 
         let mut docs: Vec<Value> = match scan_result {
-            ScanPlan::Index { prefix, range_start, range_end } => {
+            ScanPlan::Index {
+                prefix,
+                range_start,
+                range_end,
+            } => {
                 let range = if let (Some(s), Some(e)) = (&range_start, &range_end) {
                     ScanRange {
                         key_start: Bound::Included(s.to_vec()),
@@ -1318,19 +1291,19 @@ impl<'a> QueryBuilder<'a> {
                 let mut results = Vec::new();
                 for r in iter {
                     let rec = r?;
-                    if let Some(doc) =
-                        self.db.engine.get_bytes(&doc_key(self.store, &rec.value), 0)
+                    if let Some(doc) = self
+                        .db
+                        .engine
+                        .get_bytes(&doc_key(self.store, &rec.value), 0)
                     {
                         results.push(decode_doc(&doc.value)?);
                     }
                     // Early-terminate when limit is set and no sort is needed.
-                    if !needs_sort {
-                        if let Some(target) = limit_target {
-                            if results.len() >= target {
+                    if !needs_sort
+                        && let Some(target) = limit_target
+                            && results.len() >= target {
                                 break;
                             }
-                        }
-                    }
                 }
                 results
             }
@@ -1342,11 +1315,10 @@ impl<'a> QueryBuilder<'a> {
                     let rec = r?;
                     results.push(decode_doc(&rec.value)?);
                     // Early-terminate when limit is set.
-                    if let Some(target) = limit_target {
-                        if results.len() >= target {
+                    if let Some(target) = limit_target
+                        && results.len() >= target {
                             break;
                         }
-                    }
                 }
                 results
             }
@@ -1358,8 +1330,8 @@ impl<'a> QueryBuilder<'a> {
         }
 
         // 4. Sort if needed.
-        if needs_sort {
-            if let Some(ref field) = self.order_field {
+        if needs_sort
+            && let Some(ref field) = self.order_field {
                 docs.sort_by(|a, b| {
                     let va = extract_field(a, field).unwrap_or(Value::Null);
                     let vb = extract_field(b, field).unwrap_or(Value::Null);
@@ -1370,7 +1342,6 @@ impl<'a> QueryBuilder<'a> {
                     }
                 });
             }
-        }
 
         // 5. Offset + limit
         let docs: Vec<Value> = docs
@@ -1391,7 +1362,10 @@ impl<'a> QueryBuilder<'a> {
     /// ```
     pub fn collect_doc<T: serde::de::DeserializeOwned>(self) -> Result<Vec<T>> {
         let values: Vec<Value> = self.collect()?;
-        values.into_iter().map(|v| serde_json::from_value(v).map_err(FlowError::from)).collect()
+        values
+            .into_iter()
+            .map(|v| serde_json::from_value(v).map_err(FlowError::from))
+            .collect()
     }
 }
 
@@ -1407,29 +1381,22 @@ enum ScanPlan {
 /// Check whether a document matches a single filter.
 fn filter_matches(doc: &Value, filter: &QueryFilter) -> bool {
     match filter {
-        QueryFilter::Eq(field, val) => {
-            extract_field(doc, field).as_ref() == Some(val)
-        }
-        QueryFilter::Range(field, start, end) => {
-            match extract_field(doc, field) {
-                Some(ref v) => {
-                    let enc = encode_index_value(v);
-                    let enc_start = encode_index_value(start);
-                    let enc_end = encode_index_value(end);
-                    enc.as_slice() >= enc_start.as_slice()
-                        && enc.as_slice() < enc_end.as_slice()
-                }
-                None => false,
+        QueryFilter::Eq(field, val) => extract_field(doc, field).as_ref() == Some(val),
+        QueryFilter::Range(field, start, end) => match extract_field(doc, field) {
+            Some(ref v) => {
+                let enc = encode_index_value(v);
+                let enc_start = encode_index_value(start);
+                let enc_end = encode_index_value(end);
+                enc.as_slice() >= enc_start.as_slice() && enc.as_slice() < enc_end.as_slice()
             }
-        }
-        QueryFilter::In(field, values) => {
-            match extract_field(doc, field) {
-                Some(ref v) => values.iter().any(|val| {
-                    encode_index_value(v) == encode_index_value(val)
-                }),
-                None => false,
-            }
-        }
+            None => false,
+        },
+        QueryFilter::In(field, values) => match extract_field(doc, field) {
+            Some(ref v) => values
+                .iter()
+                .any(|val| encode_index_value(v) == encode_index_value(val)),
+            None => false,
+        },
     }
 }
 
@@ -1501,10 +1468,12 @@ impl<'a> QueryBuilder<'a> {
                             end_key.extend_from_slice(&enc_end);
                             break;
                         }
-                        if let Some(QueryFilter::Eq(_, v)) = self.filters.iter().find(|filt| match filt {
-                            QueryFilter::Eq(field, _) => field == prev_path,
-                            _ => false,
-                        }) {
+                        if let Some(QueryFilter::Eq(_, v)) =
+                            self.filters.iter().find(|filt| match filt {
+                                QueryFilter::Eq(field, _) => field == prev_path,
+                                _ => false,
+                            })
+                        {
                             end_key.extend_from_slice(&encode_index_value(v));
                             end_key.push(SEP);
                         }
@@ -1679,11 +1648,10 @@ fn extract_index_values(doc: &Value, idx: &IndexDef) -> Vec<Vec<Value>> {
     }
 
     // Multi-entry on single-field index: expand array elements
-    if idx.multi_entry && idx.key_paths.len() == 1 {
-        if let Value::Array(arr) = &raw[0] {
+    if idx.multi_entry && idx.key_paths.len() == 1
+        && let Value::Array(arr) = &raw[0] {
             return arr.iter().map(|v| vec![v.clone()]).collect();
         }
-    }
 
     vec![raw]
 }
@@ -1708,10 +1676,7 @@ fn prepare_counter(engine: &Engine, store: &str) -> Result<(u64, InternalRecord)
     };
 
     let next = current + 1;
-    let rec = InternalRecord::from_record(
-        &Record::new(key, 0, next.to_be_bytes().to_vec()),
-        0,
-    );
+    let rec = InternalRecord::from_record(&Record::new(key, 0, next.to_be_bytes().to_vec()), 0);
     Ok((next, rec))
 }
 
@@ -1738,7 +1703,8 @@ mod tests {
 
     fn setup_users(db: &JsonDB) {
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", &["email"], true).unwrap();
+        db.create_index("users", "by_email", &["email"], true)
+            .unwrap();
         db.create_index("users", "by_age", &["age"], false).unwrap();
     }
 
@@ -1785,8 +1751,7 @@ mod tests {
 
         db.put("users", json!({"id": "u1", "name": "Alice"}))
             .unwrap();
-        db.put("users", json!({"id": "u1", "name": "Bob"}))
-            .unwrap();
+        db.put("users", json!({"id": "u1", "name": "Bob"})).unwrap();
 
         let doc = db.get("users", &json!("u1")).unwrap().unwrap();
         assert_eq!(doc["name"], "Bob");
@@ -1800,8 +1765,7 @@ mod tests {
 
         db.put("users", json!({"id": "u1", "name": "Alice"}))
             .unwrap();
-        db.put("users", json!({"id": "u2", "name": "Bob"}))
-            .unwrap();
+        db.put("users", json!({"id": "u2", "name": "Bob"})).unwrap();
         db.put("users", json!({"id": "u3", "name": "Carol"}))
             .unwrap();
 
@@ -1830,12 +1794,20 @@ mod tests {
         let (db, _dir) = test_db();
         setup_users(&db);
 
-        db.put("users", json!({"id": "u1", "email": "alice@b.com", "age": 30}))
-            .unwrap();
-        db.put("users", json!({"id": "u2", "email": "bob@c.com", "age": 25}))
-            .unwrap();
+        db.put(
+            "users",
+            json!({"id": "u1", "email": "alice@b.com", "age": 30}),
+        )
+        .unwrap();
+        db.put(
+            "users",
+            json!({"id": "u2", "email": "bob@c.com", "age": 25}),
+        )
+        .unwrap();
 
-        let docs = db.get_by_index("users", "by_email", &json!("alice@b.com")).unwrap();
+        let docs = db
+            .get_by_index("users", "by_email", &json!("alice@b.com"))
+            .unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0]["id"], "u1");
     }
@@ -1845,15 +1817,26 @@ mod tests {
         let (db, _dir) = test_db();
         setup_users(&db);
 
-        db.put("users", json!({"id": "u1", "email": "alice@b.com", "age": 30}))
-            .unwrap();
-        db.put("users", json!({"id": "u2", "email": "bob@c.com", "age": 25}))
-            .unwrap();
-        db.put("users", json!({"id": "u3", "email": "carol@d.com", "age": 35}))
-            .unwrap();
+        db.put(
+            "users",
+            json!({"id": "u1", "email": "alice@b.com", "age": 30}),
+        )
+        .unwrap();
+        db.put(
+            "users",
+            json!({"id": "u2", "email": "bob@c.com", "age": 25}),
+        )
+        .unwrap();
+        db.put(
+            "users",
+            json!({"id": "u3", "email": "carol@d.com", "age": 35}),
+        )
+        .unwrap();
 
         // age in [25, 35) — should include u2 (age=25) and u1 (age=30)
-        let docs = db.range_by_index("users", "by_age", &json!(25), &json!(35)).unwrap();
+        let docs = db
+            .range_by_index("users", "by_age", &json!(25), &json!(35))
+            .unwrap();
         assert_eq!(docs.len(), 2, "expected 2 docs in age range [25,35)");
     }
 
@@ -1880,19 +1863,29 @@ mod tests {
         let (db, _dir) = test_db();
         setup_users(&db);
 
-        db.put("users", json!({"id": "u1", "email": "old@b.com", "age": 30}))
-            .unwrap();
+        db.put(
+            "users",
+            json!({"id": "u1", "email": "old@b.com", "age": 30}),
+        )
+        .unwrap();
 
         // Update the email.
-        db.put("users", json!({"id": "u1", "email": "new@b.com", "age": 30}))
-            .unwrap();
+        db.put(
+            "users",
+            json!({"id": "u1", "email": "new@b.com", "age": 30}),
+        )
+        .unwrap();
 
         // Old email should have no docs.
-        let docs = db.get_by_index("users", "by_email", &json!("old@b.com")).unwrap();
+        let docs = db
+            .get_by_index("users", "by_email", &json!("old@b.com"))
+            .unwrap();
         assert_eq!(docs.len(), 0, "old index entry should be gone");
 
         // New email should have the doc.
-        let docs = db.get_by_index("users", "by_email", &json!("new@b.com")).unwrap();
+        let docs = db
+            .get_by_index("users", "by_email", &json!("new@b.com"))
+            .unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0]["id"], "u1");
     }
@@ -1918,14 +1911,19 @@ mod tests {
         db.create_object_store("users", "id").unwrap();
 
         // Put docs before creating index.
-        db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
-        db.put("users", json!({"id": "u2", "email": "b@c.com"})).unwrap();
+        db.put("users", json!({"id": "u1", "email": "a@b.com"}))
+            .unwrap();
+        db.put("users", json!({"id": "u2", "email": "b@c.com"}))
+            .unwrap();
 
         // Now create the index.
-        db.create_index("users", "by_email", &["email"], true).unwrap();
+        db.create_index("users", "by_email", &["email"], true)
+            .unwrap();
 
         // Should be able to query by index.
-        let docs = db.get_by_index("users", "by_email", &json!("a@b.com")).unwrap();
+        let docs = db
+            .get_by_index("users", "by_email", &json!("a@b.com"))
+            .unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0]["id"], "u1");
     }
@@ -1965,8 +1963,11 @@ mod tests {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
 
-        let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
-        tx.put("users", json!({"id": "u1", "name": "Alice"})).unwrap();
+        let mut tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put("users", json!({"id": "u1", "name": "Alice"}))
+            .unwrap();
         tx.put("users", json!({"id": "u2", "name": "Bob"})).unwrap();
         tx.commit().unwrap();
 
@@ -1978,8 +1979,11 @@ mod tests {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
 
-        let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
-        tx.put("users", json!({"id": "u1", "name": "Alice"})).unwrap();
+        let mut tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put("users", json!({"id": "u1", "name": "Alice"}))
+            .unwrap();
         tx.abort(); // drop without commit
 
         assert_eq!(db.count("users").unwrap(), 0);
@@ -1990,9 +1994,12 @@ mod tests {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
 
-        db.put("users", json!({"id": "u1", "name": "Alice"})).unwrap();
+        db.put("users", json!({"id": "u1", "name": "Alice"}))
+            .unwrap();
 
-        let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+        let mut tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
         // Should see committed data.
         let doc = tx.get("users", &json!("u1")).unwrap().unwrap();
         assert_eq!(doc["name"], "Alice");
@@ -2010,14 +2017,20 @@ mod tests {
         let (db, _dir) = test_db();
         setup_users(&db);
 
-        db.put("users", json!({"id": "u1", "email": "alice@b.com"})).unwrap();
+        db.put("users", json!({"id": "u1", "email": "alice@b.com"}))
+            .unwrap();
 
-        let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
-        tx.put("users", json!({"id": "u2", "email": "bob@c.com"})).unwrap();
+        let mut tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put("users", json!({"id": "u2", "email": "bob@c.com"}))
+            .unwrap();
 
         // The index in the engine doesn't yet know about u2, but the
         // transaction's get_by_index should find it via the write buffer.
-        let docs = tx.get_by_index("users", "by_email", &json!("bob@c.com")).unwrap();
+        let docs = tx
+            .get_by_index("users", "by_email", &json!("bob@c.com"))
+            .unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0]["id"], "u2");
 
@@ -2028,15 +2041,21 @@ mod tests {
     fn test_transaction_atomicity() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", &["email"], true).unwrap();
+        db.create_index("users", "by_email", &["email"], true)
+            .unwrap();
 
         // This will fail because u1 already exists.
-        db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
+        db.put("users", json!({"id": "u1", "email": "a@b.com"}))
+            .unwrap();
 
         // Single batch with a unique violation.
-        let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
-        tx.put("users", json!({"id": "u2", "email": "b@c.com"})).unwrap();
-        tx.put("users", json!({"id": "u3", "email": "a@b.com"})).unwrap(); // violation
+        let mut tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put("users", json!({"id": "u2", "email": "b@c.com"}))
+            .unwrap();
+        tx.put("users", json!({"id": "u3", "email": "a@b.com"}))
+            .unwrap(); // violation
 
         let err = tx.commit();
         assert!(err.is_err(), "expected unique violation on commit");
@@ -2051,8 +2070,12 @@ mod tests {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
 
-        let mut tx = db.transaction(&["users"], TransactionMode::ReadOnly).unwrap();
-        let err = tx.put("users", json!({"id": "u1", "name": "Alice"})).unwrap_err();
+        let mut tx = db
+            .transaction(&["users"], TransactionMode::ReadOnly)
+            .unwrap();
+        let err = tx
+            .put("users", json!({"id": "u1", "name": "Alice"}))
+            .unwrap_err();
         assert!(
             err.to_string().contains("read-only"),
             "expected read-only error: {}",
@@ -2079,7 +2102,8 @@ mod tests {
     fn test_create_delete_index() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", &["email"], true).unwrap();
+        db.create_index("users", "by_email", &["email"], true)
+            .unwrap();
 
         let def = db.get_store("users").unwrap();
         assert_eq!(def.indexes.len(), 1);
@@ -2113,9 +2137,7 @@ mod tests {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
 
-        let err = db
-            .put("users", json!({"name": "Alice"}))
-            .unwrap_err();
+        let err = db.put("users", json!({"name": "Alice"})).unwrap_err();
         assert!(
             err.to_string().contains("missing"),
             "expected missing-key error: {}",
@@ -2150,8 +2172,10 @@ mod tests {
             };
             let db = JsonDB::open(cfg).unwrap();
             db.create_object_store("users", "id").unwrap();
-            db.create_index("users", "by_email", &["email"], true).unwrap();
-            db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
+            db.create_index("users", "by_email", &["email"], true)
+                .unwrap();
+            db.put("users", json!({"id": "u1", "email": "a@b.com"}))
+                .unwrap();
             db.shutdown().unwrap();
         }
 
@@ -2168,7 +2192,9 @@ mod tests {
             let doc = db.get("users", &json!("u1")).unwrap().unwrap();
             assert_eq!(doc["email"], "a@b.com");
 
-            let docs = db.get_by_index("users", "by_email", &json!("a@b.com")).unwrap();
+            let docs = db
+                .get_by_index("users", "by_email", &json!("a@b.com"))
+                .unwrap();
             assert_eq!(docs.len(), 1);
         }
     }
@@ -2179,7 +2205,8 @@ mod tests {
         db.create_object_store("nums", "id").unwrap();
 
         db.put("nums", json!({"id": 42, "name": "answer"})).unwrap();
-        db.put("nums", json!({"id": 100, "name": "hundred"})).unwrap();
+        db.put("nums", json!({"id": 100, "name": "hundred"}))
+            .unwrap();
 
         assert_eq!(db.count("nums").unwrap(), 2);
         let doc = db.get("nums", &json!(42)).unwrap().unwrap();
@@ -2194,15 +2221,21 @@ mod tests {
         let (db, _dir) = test_db();
         setup_users(&db);
 
-        db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
-        db.put("users", json!({"id": "u2", "email": "b@c.com"})).unwrap();
+        db.put("users", json!({"id": "u1", "email": "a@b.com"}))
+            .unwrap();
+        db.put("users", json!({"id": "u2", "email": "b@c.com"}))
+            .unwrap();
 
-        let docs = db.get_by_index("users", "by_email", &json!("a@b.com")).unwrap();
+        let docs = db
+            .get_by_index("users", "by_email", &json!("a@b.com"))
+            .unwrap();
         assert_eq!(docs.len(), 1);
 
         db.delete("users", &json!("u1")).unwrap();
 
-        let docs = db.get_by_index("users", "by_email", &json!("a@b.com")).unwrap();
+        let docs = db
+            .get_by_index("users", "by_email", &json!("a@b.com"))
+            .unwrap();
         assert_eq!(docs.len(), 0, "index entry should be removed after delete");
     }
 
@@ -2239,7 +2272,9 @@ mod tests {
     #[test]
     fn test_get_by_index_missing_store() {
         let (db, _dir) = test_db();
-        let err = db.get_by_index("nonexistent", "idx", &json!("v")).unwrap_err();
+        let err = db
+            .get_by_index("nonexistent", "idx", &json!("v"))
+            .unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
@@ -2247,14 +2282,18 @@ mod tests {
     fn test_get_by_index_missing_index() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        let err = db.get_by_index("users", "nonexistent", &json!("v")).unwrap_err();
+        let err = db
+            .get_by_index("users", "nonexistent", &json!("v"))
+            .unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
     #[test]
     fn test_range_by_index_missing_store() {
         let (db, _dir) = test_db();
-        let err = db.range_by_index("nonexistent", "idx", &json!(0), &json!(10)).unwrap_err();
+        let err = db
+            .range_by_index("nonexistent", "idx", &json!(0), &json!(10))
+            .unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
@@ -2262,7 +2301,9 @@ mod tests {
     fn test_range_by_index_missing_index() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        let err = db.range_by_index("users", "nonexistent", &json!(0), &json!(10)).unwrap_err();
+        let err = db
+            .range_by_index("users", "nonexistent", &json!(0), &json!(10))
+            .unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
@@ -2277,7 +2318,9 @@ mod tests {
     #[test]
     fn test_put_auto_missing_store() {
         let (db, _dir) = test_db();
-        let err = db.put_auto("nonexistent", json!({"type": "x"})).unwrap_err();
+        let err = db
+            .put_auto("nonexistent", json!({"type": "x"}))
+            .unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
@@ -2308,15 +2351,20 @@ mod tests {
     fn test_create_index_duplicate() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", &["email"], true).unwrap();
-        let err = db.create_index("users", "by_email", &["phone"], true).unwrap_err();
+        db.create_index("users", "by_email", &["email"], true)
+            .unwrap();
+        let err = db
+            .create_index("users", "by_email", &["phone"], true)
+            .unwrap_err();
         assert!(err.to_string().contains("already exists"));
     }
 
     #[test]
     fn test_create_index_missing_store() {
         let (db, _dir) = test_db();
-        let err = db.create_index("nonexistent", "idx", &["field"], false).unwrap_err();
+        let err = db
+            .create_index("nonexistent", "idx", &["field"], false)
+            .unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
@@ -2338,7 +2386,9 @@ mod tests {
     #[test]
     fn test_transaction_missing_store() {
         let (db, _dir) = test_db();
-        let err = db.transaction(&["nonexistent"], TransactionMode::ReadWrite).unwrap_err();
+        let err = db
+            .transaction(&["nonexistent"], TransactionMode::ReadWrite)
+            .unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
@@ -2346,9 +2396,12 @@ mod tests {
     fn test_transaction_delete_in_buffer() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.put("users", json!({"id": "u1", "name": "Alice"})).unwrap();
+        db.put("users", json!({"id": "u1", "name": "Alice"}))
+            .unwrap();
 
-        let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+        let mut tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
         let doc = tx.get("users", &json!("u1")).unwrap().unwrap();
         assert_eq!(doc["name"], "Alice");
 
@@ -2365,12 +2418,17 @@ mod tests {
         db.create_object_store("events", "id").unwrap();
         let mut def = db.get_store("events").unwrap();
         def.auto_increment = true;
-        db.engine.write_internal(vec![InternalRecord::from_record(
-            &schema_record(&def).unwrap(), 0,
-        )]).unwrap();
+        db.engine
+            .write_internal(vec![InternalRecord::from_record(
+                &schema_record(&def).unwrap(),
+                0,
+            )])
+            .unwrap();
         db.schema.insert(def);
 
-        let mut tx = db.transaction(&["events"], TransactionMode::ReadWrite).unwrap();
+        let mut tx = db
+            .transaction(&["events"], TransactionMode::ReadWrite)
+            .unwrap();
         let key1 = tx.put_auto("events", json!({"type": "click"})).unwrap();
         assert_eq!(key1, json!(1));
         let key2 = tx.put_auto("events", json!({"type": "scroll"})).unwrap();
@@ -2384,7 +2442,9 @@ mod tests {
     fn test_transaction_put_auto_non_auto() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+        let mut tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
         let err = tx.put_auto("users", json!({"name": "x"})).unwrap_err();
         assert!(err.to_string().contains("not auto-increment"));
     }
@@ -2393,9 +2453,12 @@ mod tests {
     fn test_transaction_scan_buffered_puts() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.put("users", json!({"id": "u1", "name": "Alice"})).unwrap();
+        db.put("users", json!({"id": "u1", "name": "Alice"}))
+            .unwrap();
 
-        let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+        let mut tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
         tx.put("users", json!({"id": "u2", "name": "Bob"})).unwrap();
 
         // Scan should see both committed and buffered docs.
@@ -2408,10 +2471,13 @@ mod tests {
     fn test_transaction_scan_with_buffered_delete() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.put("users", json!({"id": "u1", "name": "Alice"})).unwrap();
+        db.put("users", json!({"id": "u1", "name": "Alice"}))
+            .unwrap();
         db.put("users", json!({"id": "u2", "name": "Bob"})).unwrap();
 
-        let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+        let mut tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
         tx.delete("users", &json!("u1")).unwrap();
 
         let docs = tx.scan("users").unwrap();
@@ -2426,10 +2492,14 @@ mod tests {
         setup_users(&db);
         db.put("users", json!({"id": "u1", "age": 30})).unwrap();
 
-        let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+        let mut tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
         tx.put("users", json!({"id": "u2", "age": 25})).unwrap();
 
-        let docs = tx.range_by_index("users", "by_age", &json!(20), &json!(35)).unwrap();
+        let docs = tx
+            .range_by_index("users", "by_age", &json!(20), &json!(35))
+            .unwrap();
         // Should see both u1 (committed) and u2 (buffered)
         assert_eq!(docs.len(), 2);
         tx.commit().unwrap();
@@ -2439,19 +2509,27 @@ mod tests {
     fn test_transaction_get_by_index_buffered_update() {
         let (db, _dir) = test_db();
         setup_users(&db);
-        db.put("users", json!({"id": "u1", "email": "old@b.com"})).unwrap();
+        db.put("users", json!({"id": "u1", "email": "old@b.com"}))
+            .unwrap();
 
-        let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+        let mut tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
         // Update email in buffer (not yet committed)
         tx.delete("users", &json!("u1")).unwrap();
-        tx.put("users", json!({"id": "u1", "email": "new@b.com"})).unwrap();
+        tx.put("users", json!({"id": "u1", "email": "new@b.com"}))
+            .unwrap();
 
         // get_by_index should NOT find old email (doc deleted in buffer)
-        let docs = tx.get_by_index("users", "by_email", &json!("old@b.com")).unwrap();
+        let docs = tx
+            .get_by_index("users", "by_email", &json!("old@b.com"))
+            .unwrap();
         assert_eq!(docs.len(), 0, "old email should not be visible");
 
         // Should find new email from buffer
-        let docs = tx.get_by_index("users", "by_email", &json!("new@b.com")).unwrap();
+        let docs = tx
+            .get_by_index("users", "by_email", &json!("new@b.com"))
+            .unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0]["id"], "u1");
         tx.commit().unwrap();
@@ -2461,11 +2539,16 @@ mod tests {
     fn test_transaction_get_by_index_buffered_delete_only() {
         let (db, _dir) = test_db();
         setup_users(&db);
-        db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
+        db.put("users", json!({"id": "u1", "email": "a@b.com"}))
+            .unwrap();
 
-        let tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+        let tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
         // Without any buffered writes, read-only should work
-        let docs = tx.get_by_index("users", "by_email", &json!("a@b.com")).unwrap();
+        let docs = tx
+            .get_by_index("users", "by_email", &json!("a@b.com"))
+            .unwrap();
         assert_eq!(docs.len(), 1);
     }
 
@@ -2474,8 +2557,11 @@ mod tests {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
         {
-            let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
-            tx.put("users", json!({"id": "u1", "name": "Alice"})).unwrap();
+            let mut tx = db
+                .transaction(&["users"], TransactionMode::ReadWrite)
+                .unwrap();
+            tx.put("users", json!({"id": "u1", "name": "Alice"}))
+                .unwrap();
             // Drop without commit = abort
         }
         assert_eq!(db.count("users").unwrap(), 0);
@@ -2485,7 +2571,9 @@ mod tests {
     fn test_transaction_double_commit() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        let tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+        let tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
         // tx.put... but we need to capture the result of first commit
         // empty commit should work
         assert!(tx.commit().is_ok());
@@ -2495,7 +2583,9 @@ mod tests {
     fn test_transaction_empty_commit() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        let tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+        let tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
         assert!(tx.commit().is_ok());
     }
 
@@ -2505,8 +2595,10 @@ mod tests {
     fn test_delete_store_with_indexes_and_data() {
         let (db, _dir) = test_db();
         setup_users(&db);
-        db.put("users", json!({"id": "u1", "email": "a@b.com", "age": 30})).unwrap();
-        db.put("users", json!({"id": "u2", "email": "b@c.com", "age": 25})).unwrap();
+        db.put("users", json!({"id": "u1", "email": "a@b.com", "age": 30}))
+            .unwrap();
+        db.put("users", json!({"id": "u2", "email": "b@c.com", "age": 25}))
+            .unwrap();
         assert_eq!(db.count("users").unwrap(), 2);
 
         db.delete_object_store("users").unwrap();
@@ -2522,9 +2614,12 @@ mod tests {
         db.create_object_store("events", "id").unwrap();
         let mut def = db.get_store("events").unwrap();
         def.auto_increment = true;
-        db.engine.write_internal(vec![InternalRecord::from_record(
-            &schema_record(&def).unwrap(), 0,
-        )]).unwrap();
+        db.engine
+            .write_internal(vec![InternalRecord::from_record(
+                &schema_record(&def).unwrap(),
+                0,
+            )])
+            .unwrap();
         db.schema.insert(def);
 
         db.put_auto("events", json!({"type": "click"})).unwrap();
@@ -2538,9 +2633,12 @@ mod tests {
     fn test_index_on_nested_field() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_city", &["address.city"], false).unwrap();
-        db.put("users", json!({"id": "u1", "address": {"city": "NYC"}})).unwrap();
-        db.put("users", json!({"id": "u2", "address": {"city": "SF"}})).unwrap();
+        db.create_index("users", "by_city", &["address.city"], false)
+            .unwrap();
+        db.put("users", json!({"id": "u1", "address": {"city": "NYC"}}))
+            .unwrap();
+        db.put("users", json!({"id": "u2", "address": {"city": "SF"}}))
+            .unwrap();
 
         let docs = db.get_by_index("users", "by_city", &json!("NYC")).unwrap();
         assert_eq!(docs.len(), 1);
@@ -2551,7 +2649,8 @@ mod tests {
     fn test_index_on_field_not_present() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", &["email"], false).unwrap();
+        db.create_index("users", "by_email", &["email"], false)
+            .unwrap();
         // Doc without the indexed field
         db.put("users", json!({"id": "u1"})).unwrap();
         // Should not create index entry, so query returns no results
@@ -2563,7 +2662,8 @@ mod tests {
     fn test_index_float_values() {
         let (db, _dir) = test_db();
         db.create_object_store("scores", "id").unwrap();
-        db.create_index("scores", "by_score", &["score"], false).unwrap();
+        db.create_index("scores", "by_score", &["score"], false)
+            .unwrap();
 
         db.put("scores", json!({"id": "a", "score": 95.5})).unwrap();
         db.put("scores", json!({"id": "b", "score": 87.3})).unwrap();
@@ -2572,7 +2672,9 @@ mod tests {
         let docs = db.get_by_index("scores", "by_score", &json!(95.5)).unwrap();
         assert_eq!(docs.len(), 2);
 
-        let docs = db.range_by_index("scores", "by_score", &json!(80.0), &json!(90.0)).unwrap();
+        let docs = db
+            .range_by_index("scores", "by_score", &json!(80.0), &json!(90.0))
+            .unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0]["id"], "b");
     }
@@ -2581,7 +2683,8 @@ mod tests {
     fn test_index_bool_values() {
         let (db, _dir) = test_db();
         db.create_object_store("items", "id").unwrap();
-        db.create_index("items", "by_active", &["active"], false).unwrap();
+        db.create_index("items", "by_active", &["active"], false)
+            .unwrap();
 
         db.put("items", json!({"id": 1, "active": true})).unwrap();
         db.put("items", json!({"id": 2, "active": false})).unwrap();
@@ -2590,7 +2693,9 @@ mod tests {
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0]["id"], 1);
 
-        let docs = db.get_by_index("items", "by_active", &json!(false)).unwrap();
+        let docs = db
+            .get_by_index("items", "by_active", &json!(false))
+            .unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0]["id"], 2);
     }
@@ -2599,11 +2704,14 @@ mod tests {
     fn test_index_null_values() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", &["email"], false).unwrap();
+        db.create_index("users", "by_email", &["email"], false)
+            .unwrap();
 
         db.put("users", json!({"id": "u1", "email": null})).unwrap();
 
-        let docs = db.get_by_index("users", "by_email", &json!(Value::Null)).unwrap();
+        let docs = db
+            .get_by_index("users", "by_email", &json!(Value::Null))
+            .unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0]["id"], "u1");
     }
@@ -2627,8 +2735,10 @@ mod tests {
         assert_eq!(docs.len(), n / 50);
 
         // Index range query
-        let docs = db.range_by_index("large", "by_val", &json!(10), &json!(20)).unwrap();
-        assert!(docs.len() > 0);
+        let docs = db
+            .range_by_index("large", "by_val", &json!(10), &json!(20))
+            .unwrap();
+        assert!(!docs.is_empty());
 
         // Non-string key check
         let doc = db.get("large", &json!(0)).unwrap();
@@ -2663,7 +2773,11 @@ mod tests {
 
         // Create with schema and data, then reopen via JsonDB::open
         {
-            let cfg = Config { data_dir: path.clone(), auto_background: false, ..Default::default() };
+            let cfg = Config {
+                data_dir: path.clone(),
+                auto_background: false,
+                ..Default::default()
+            };
             let db = JsonDB::open(cfg).unwrap();
             db.create_object_store("users", "id").unwrap();
             db.put("users", json!({"id": "u1"})).unwrap();
@@ -2672,7 +2786,11 @@ mod tests {
 
         // Reopen via JsonDB::open (which internally calls Engine::open)
         {
-            let cfg = Config { data_dir: path, auto_background: false, ..Default::default() };
+            let cfg = Config {
+                data_dir: path,
+                auto_background: false,
+                ..Default::default()
+            };
             let db = JsonDB::open(cfg).unwrap();
             assert!(db.get_store("users").is_some());
             assert_eq!(db.count("users").unwrap(), 1);
@@ -2687,7 +2805,9 @@ mod tests {
         db.create_object_store("users", "id").unwrap();
         db.put("users", json!({"id": "u1"})).unwrap();
 
-        let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+        let mut tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
         // u1 is committed, u2 is buffered
         tx.put("users", json!({"id": "u2"})).unwrap();
         assert_eq!(tx.count("users").unwrap(), 2);
@@ -2711,7 +2831,8 @@ mod tests {
         assert_eq!(doc["name"], "yes");
 
         // Null key
-        db.put("items", json!({"id": null, "name": "nothing"})).unwrap();
+        db.put("items", json!({"id": null, "name": "nothing"}))
+            .unwrap();
 
         // Negative number key
         db.put("items", json!({"id": -5, "name": "neg"})).unwrap();
@@ -2725,15 +2846,23 @@ mod tests {
     fn test_create_index_on_existing_data_unique_violation() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.put("users", json!({"id": "u1", "email": "same@b.com"})).unwrap();
-        db.put("users", json!({"id": "u2", "email": "same@b.com"})).unwrap();
+        db.put("users", json!({"id": "u1", "email": "same@b.com"}))
+            .unwrap();
+        db.put("users", json!({"id": "u2", "email": "same@b.com"}))
+            .unwrap();
 
         // Creating a unique index on existing data with duplicates succeeds
         // but subsequent put attempts will fail with unique violation.
-        db.create_index("users", "by_email", &["email"], true).unwrap();
+        db.create_index("users", "by_email", &["email"], true)
+            .unwrap();
 
-        let err = db.put("users", json!({"id": "u3", "email": "same@b.com"})).unwrap_err();
-        assert!(err.to_string().contains("unique"), "expected unique violation");
+        let err = db
+            .put("users", json!({"id": "u3", "email": "same@b.com"}))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unique"),
+            "expected unique violation"
+        );
     }
 
     // ── validate_name edge cases ──────────────────────────────────
@@ -2771,7 +2900,12 @@ mod tests {
             name: "users".into(),
             key_path: "id".into(),
             auto_increment: false,
-            indexes: vec![IndexDef { name: "existing".into(), key_paths: vec!["f".into()], unique: false, multi_entry: false }],
+            indexes: vec![IndexDef {
+                name: "existing".into(),
+                key_paths: vec!["f".into()],
+                unique: false,
+                multi_entry: false,
+            }],
             next_auto_id: 0,
         };
         assert!(validate_index_def(&def, "", &["f"]).is_err());
@@ -2832,7 +2966,9 @@ mod tests {
         db.put("users", json!({"id": "u1", "age": 30})).unwrap();
 
         // Empty range [100, 100) should return no results
-        let docs = db.range_by_index("users", "by_age", &json!(100), &json!(100)).unwrap();
+        let docs = db
+            .range_by_index("users", "by_age", &json!(100), &json!(100))
+            .unwrap();
         assert_eq!(docs.len(), 0);
     }
 
@@ -2843,7 +2979,9 @@ mod tests {
         db.put("users", json!({"id": "u1", "age": 30})).unwrap();
 
         // Range [30, 30) should be empty (exclusive end)
-        let docs = db.range_by_index("users", "by_age", &json!(30), &json!(30)).unwrap();
+        let docs = db
+            .range_by_index("users", "by_age", &json!(30), &json!(30))
+            .unwrap();
         assert_eq!(docs.len(), 0);
     }
 
@@ -2857,7 +2995,9 @@ mod tests {
         for i in 0..10 {
             let db = db.clone();
             threads.push(std::thread::spawn(move || {
-                let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+                let mut tx = db
+                    .transaction(&["users"], TransactionMode::ReadWrite)
+                    .unwrap();
                 tx.put("users", json!({"id": format!("t{}", i)})).unwrap();
                 tx.commit().unwrap();
             }));
@@ -2873,18 +3013,26 @@ mod tests {
         let (db, _dir) = test_db();
         setup_users(&db);
 
-        db.put("users", json!({"id": "u1", "email": "old@b.com"})).unwrap();
+        db.put("users", json!({"id": "u1", "email": "old@b.com"}))
+            .unwrap();
 
-        let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+        let mut tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
         tx.delete("users", &json!("u1")).unwrap();
-        tx.put("users", json!({"id": "u1", "email": "new@b.com"})).unwrap();
+        tx.put("users", json!({"id": "u1", "email": "new@b.com"}))
+            .unwrap();
         tx.commit().unwrap();
 
         // After commit, index should be updated
-        let docs = db.get_by_index("users", "by_email", &json!("new@b.com")).unwrap();
+        let docs = db
+            .get_by_index("users", "by_email", &json!("new@b.com"))
+            .unwrap();
         assert_eq!(docs.len(), 1);
 
-        let docs = db.get_by_index("users", "by_email", &json!("old@b.com")).unwrap();
+        let docs = db
+            .get_by_index("users", "by_email", &json!("old@b.com"))
+            .unwrap();
         assert_eq!(docs.len(), 0);
     }
 
@@ -2893,17 +3041,29 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_path_buf();
         {
-            let cfg = Config { data_dir: path.clone(), auto_background: false, ..Default::default() };
+            let cfg = Config {
+                data_dir: path.clone(),
+                auto_background: false,
+                ..Default::default()
+            };
             let db = JsonDB::open(cfg).unwrap();
             db.create_object_store("users", "id").unwrap();
-            db.create_index("users", "by_name", &["name"], false).unwrap();
-            db.put("users", json!({"id": "u1", "name": "Alice"})).unwrap();
+            db.create_index("users", "by_name", &["name"], false)
+                .unwrap();
+            db.put("users", json!({"id": "u1", "name": "Alice"}))
+                .unwrap();
             db.shutdown().unwrap();
         }
         {
-            let cfg = Config { data_dir: path, auto_background: false, ..Default::default() };
+            let cfg = Config {
+                data_dir: path,
+                auto_background: false,
+                ..Default::default()
+            };
             let db = JsonDB::open(cfg).unwrap();
-            let docs = db.get_by_index("users", "by_name", &json!("Alice")).unwrap();
+            let docs = db
+                .get_by_index("users", "by_name", &json!("Alice"))
+                .unwrap();
             assert_eq!(docs.len(), 1);
         }
     }
@@ -2920,19 +3080,28 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_path_buf();
         {
-            let cfg = Config { data_dir: path.clone(), auto_background: false, ..Default::default() };
+            let cfg = Config {
+                data_dir: path.clone(),
+                auto_background: false,
+                ..Default::default()
+            };
             let db = JsonDB::open(cfg).unwrap();
             db.create_object_store("store", "id").unwrap();
             db.create_index("store", "by_val", &["val"], true).unwrap();
             for i in 0u64..20 {
-                db.put("store", json!({"id": i, "val": format!("v{}", i)})).unwrap();
+                db.put("store", json!({"id": i, "val": format!("v{}", i)}))
+                    .unwrap();
             }
             // Flush + fsync before shutdown.
             db.close().unwrap();
         }
         // Reopen — all 20 docs and their index entries must be present.
         {
-            let cfg = Config { data_dir: path, auto_background: false, ..Default::default() };
+            let cfg = Config {
+                data_dir: path,
+                auto_background: false,
+                ..Default::default()
+            };
             let db = JsonDB::open(cfg).unwrap();
             assert_eq!(db.count("store").unwrap(), 20);
             for i in 0u64..20 {
@@ -3030,7 +3199,9 @@ mod tests {
 
         let start = std::time::Instant::now();
         for b in 0..batches {
-            let mut tx = db.transaction(&["bench"], TransactionMode::ReadWrite).unwrap();
+            let mut tx = db
+                .transaction(&["bench"], TransactionMode::ReadWrite)
+                .unwrap();
             for i in 0..batch_size {
                 let id = b * batch_size + i;
                 tx.put("bench", json!({"id": id as u64})).unwrap();
@@ -3041,7 +3212,11 @@ mod tests {
         let ops_per_sec = total as f64 / elapsed.as_secs_f64();
         eprintln!(
             "JsonDB transaction batch ({} × {} docs): {} docs in {:.3}s = {:.0} docs/s",
-            batches, batch_size, total, elapsed.as_secs_f64(), ops_per_sec
+            batches,
+            batch_size,
+            total,
+            elapsed.as_secs_f64(),
+            ops_per_sec
         );
         assert_eq!(db.count("bench").unwrap(), total);
     }
@@ -3052,9 +3227,12 @@ mod tests {
         db.create_object_store("auto", "id").unwrap();
         let mut def = db.get_store("auto").unwrap();
         def.auto_increment = true;
-        db.engine.write_internal(vec![InternalRecord::from_record(
-            &schema_record(&def).unwrap(), 0,
-        )]).unwrap();
+        db.engine
+            .write_internal(vec![InternalRecord::from_record(
+                &schema_record(&def).unwrap(),
+                0,
+            )])
+            .unwrap();
         db.schema.insert(def);
 
         let n = 50;
@@ -3066,7 +3244,9 @@ mod tests {
         let ops_per_sec = n as f64 / elapsed.as_secs_f64();
         eprintln!(
             "JsonDB auto-increment ({} ops): {:.3}s = {:.0} ops/s",
-            n, elapsed.as_secs_f64(), ops_per_sec
+            n,
+            elapsed.as_secs_f64(),
+            ops_per_sec
         );
         assert_eq!(db.count("auto").unwrap(), n);
     }
@@ -3077,18 +3257,26 @@ mod tests {
     fn test_composite_index_equality() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_city_age", &["city", "age"], false).unwrap();
+        db.create_index("users", "by_city_age", &["city", "age"], false)
+            .unwrap();
 
-        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30})).unwrap();
-        db.put("users", json!({"id": "u2", "city": "NYC", "age": 25})).unwrap();
-        db.put("users", json!({"id": "u3", "city": "SF", "age": 30})).unwrap();
+        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30}))
+            .unwrap();
+        db.put("users", json!({"id": "u2", "city": "NYC", "age": 25}))
+            .unwrap();
+        db.put("users", json!({"id": "u3", "city": "SF", "age": 30}))
+            .unwrap();
 
         // Query by first field only (prefix scan)
-        let docs = db.get_by_index("users", "by_city_age", &json!("NYC")).unwrap();
+        let docs = db
+            .get_by_index("users", "by_city_age", &json!("NYC"))
+            .unwrap();
         assert_eq!(docs.len(), 2);
 
         // Query by all fields (exact match)
-        let docs = db.get_by_index("users", "by_city_age", &json!(["NYC", 30])).unwrap();
+        let docs = db
+            .get_by_index("users", "by_city_age", &json!(["NYC", 30]))
+            .unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0]["id"], "u1");
     }
@@ -3097,17 +3285,24 @@ mod tests {
     fn test_composite_index_update() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_city_age", &["city", "age"], true).unwrap();
+        db.create_index("users", "by_city_age", &["city", "age"], true)
+            .unwrap();
 
-        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30})).unwrap();
+        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30}))
+            .unwrap();
 
         // Update city → old index entry removed, new one created
-        db.put("users", json!({"id": "u1", "city": "SF", "age": 30})).unwrap();
+        db.put("users", json!({"id": "u1", "city": "SF", "age": 30}))
+            .unwrap();
 
-        let docs = db.get_by_index("users", "by_city_age", &json!(["NYC", 30])).unwrap();
+        let docs = db
+            .get_by_index("users", "by_city_age", &json!(["NYC", 30]))
+            .unwrap();
         assert_eq!(docs.len(), 0, "old composite value should be gone");
 
-        let docs = db.get_by_index("users", "by_city_age", &json!(["SF", 30])).unwrap();
+        let docs = db
+            .get_by_index("users", "by_city_age", &json!(["SF", 30]))
+            .unwrap();
         assert_eq!(docs.len(), 1);
     }
 
@@ -3115,14 +3310,22 @@ mod tests {
     fn test_composite_index_unique() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_city_age", &["city", "age"], true).unwrap();
+        db.create_index("users", "by_city_age", &["city", "age"], true)
+            .unwrap();
 
-        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30})).unwrap();
-        let err = db.put("users", json!({"id": "u2", "city": "NYC", "age": 30})).unwrap_err();
-        assert!(err.to_string().contains("unique"), "composite unique should fail");
+        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30}))
+            .unwrap();
+        let err = db
+            .put("users", json!({"id": "u2", "city": "NYC", "age": 30}))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unique"),
+            "composite unique should fail"
+        );
 
         // Same city, different age → should succeed
-        db.put("users", json!({"id": "u2", "city": "NYC", "age": 25})).unwrap();
+        db.put("users", json!({"id": "u2", "city": "NYC", "age": 25}))
+            .unwrap();
         assert_eq!(db.count("users").unwrap(), 2);
     }
 
@@ -3130,13 +3333,18 @@ mod tests {
     fn test_composite_index_on_existing_data() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30})).unwrap();
-        db.put("users", json!({"id": "u2", "city": "SF", "age": 25})).unwrap();
+        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30}))
+            .unwrap();
+        db.put("users", json!({"id": "u2", "city": "SF", "age": 25}))
+            .unwrap();
 
         // Create composite on existing data
-        db.create_index("users", "by_city_age", &["city", "age"], false).unwrap();
+        db.create_index("users", "by_city_age", &["city", "age"], false)
+            .unwrap();
 
-        let docs = db.get_by_index("users", "by_city_age", &json!(["NYC", 30])).unwrap();
+        let docs = db
+            .get_by_index("users", "by_city_age", &json!(["NYC", 30]))
+            .unwrap();
         assert_eq!(docs.len(), 1);
     }
 
@@ -3146,11 +3354,15 @@ mod tests {
     fn test_query_builder_eq() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", &["email"], true).unwrap();
-        db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
-        db.put("users", json!({"id": "u2", "email": "b@c.com"})).unwrap();
+        db.create_index("users", "by_email", &["email"], true)
+            .unwrap();
+        db.put("users", json!({"id": "u1", "email": "a@b.com"}))
+            .unwrap();
+        db.put("users", json!({"id": "u2", "email": "b@c.com"}))
+            .unwrap();
 
-        let docs = db.query("users")
+        let docs = db
+            .query("users")
             .where_eq("email", json!("a@b.com"))
             .collect()
             .unwrap();
@@ -3162,12 +3374,17 @@ mod tests {
     fn test_query_builder_composite_eq() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_city_age", &["city", "age"], false).unwrap();
-        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30})).unwrap();
-        db.put("users", json!({"id": "u2", "city": "NYC", "age": 25})).unwrap();
-        db.put("users", json!({"id": "u3", "city": "SF", "age": 30})).unwrap();
+        db.create_index("users", "by_city_age", &["city", "age"], false)
+            .unwrap();
+        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30}))
+            .unwrap();
+        db.put("users", json!({"id": "u2", "city": "NYC", "age": 25}))
+            .unwrap();
+        db.put("users", json!({"id": "u3", "city": "SF", "age": 30}))
+            .unwrap();
 
-        let docs = db.query("users")
+        let docs = db
+            .query("users")
             .where_eq("city", json!("NYC"))
             .where_eq("age", json!(30))
             .collect()
@@ -3185,7 +3402,8 @@ mod tests {
         db.put("users", json!({"id": "u2", "age": 25})).unwrap();
         db.put("users", json!({"id": "u3", "age": 35})).unwrap();
 
-        let docs = db.query("users")
+        let docs = db
+            .query("users")
             .where_range("age", json!(25), json!(35))
             .collect()
             .unwrap();
@@ -3196,12 +3414,17 @@ mod tests {
     fn test_query_builder_eq_and_range() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_city_age", &["city", "age"], false).unwrap();
-        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30})).unwrap();
-        db.put("users", json!({"id": "u2", "city": "NYC", "age": 25})).unwrap();
-        db.put("users", json!({"id": "u3", "city": "SF", "age": 30})).unwrap();
+        db.create_index("users", "by_city_age", &["city", "age"], false)
+            .unwrap();
+        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30}))
+            .unwrap();
+        db.put("users", json!({"id": "u2", "city": "NYC", "age": 25}))
+            .unwrap();
+        db.put("users", json!({"id": "u3", "city": "SF", "age": 30}))
+            .unwrap();
 
-        let docs = db.query("users")
+        let docs = db
+            .query("users")
             .where_eq("city", json!("NYC"))
             .where_range("age", json!(20), json!(30))
             .collect()
@@ -3218,17 +3441,10 @@ mod tests {
             db.put("users", json!({"id": i, "val": i})).unwrap();
         }
 
-        let docs = db.query("users")
-            .limit(3)
-            .collect()
-            .unwrap();
+        let docs = db.query("users").limit(3).collect().unwrap();
         assert_eq!(docs.len(), 3);
 
-        let docs = db.query("users")
-            .offset(5)
-            .limit(3)
-            .collect()
-            .unwrap();
+        let docs = db.query("users").offset(5).limit(3).collect().unwrap();
         assert_eq!(docs.len(), 3);
     }
 
@@ -3241,7 +3457,8 @@ mod tests {
         db.put("users", json!({"id": "u2", "age": 25})).unwrap();
         db.put("users", json!({"id": "u3", "age": 35})).unwrap();
 
-        let docs = db.query("users")
+        let docs = db
+            .query("users")
             .order_by("age", SortDir::Asc)
             .collect()
             .unwrap();
@@ -3258,7 +3475,8 @@ mod tests {
         db.put("users", json!({"id": "u1", "age": 30})).unwrap();
         db.put("users", json!({"id": "u2", "age": 25})).unwrap();
 
-        let docs = db.query("users")
+        let docs = db
+            .query("users")
             .order_by("age", SortDir::Desc)
             .collect()
             .unwrap();
@@ -3275,7 +3493,8 @@ mod tests {
         db.put("users", json!({"id": "u2", "city": "SF"})).unwrap();
         db.put("users", json!({"id": "u3", "city": "LA"})).unwrap();
 
-        let docs = db.query("users")
+        let docs = db
+            .query("users")
             .where_in("city", vec![json!("NYC"), json!("LA")])
             .collect()
             .unwrap();
@@ -3286,11 +3505,14 @@ mod tests {
     fn test_query_builder_no_matching_index() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.put("users", json!({"id": "u1", "color": "red"})).unwrap();
-        db.put("users", json!({"id": "u2", "color": "blue"})).unwrap();
+        db.put("users", json!({"id": "u1", "color": "red"}))
+            .unwrap();
+        db.put("users", json!({"id": "u2", "color": "blue"}))
+            .unwrap();
 
         // No index on "color" → full scan with filter
-        let docs = db.query("users")
+        let docs = db
+            .query("users")
             .where_eq("color", json!("red"))
             .collect()
             .unwrap();
@@ -3308,11 +3530,13 @@ mod tests {
     fn test_query_builder_bool_index() {
         let (db, _dir) = test_db();
         db.create_object_store("items", "id").unwrap();
-        db.create_index("items", "by_active", &["active"], false).unwrap();
+        db.create_index("items", "by_active", &["active"], false)
+            .unwrap();
         db.put("items", json!({"id": 1, "active": true})).unwrap();
         db.put("items", json!({"id": 2, "active": false})).unwrap();
 
-        let docs = db.query("items")
+        let docs = db
+            .query("items")
             .where_eq("active", json!(true))
             .collect()
             .unwrap();
@@ -3324,11 +3548,14 @@ mod tests {
     fn test_query_builder_with_transaction_roundtrip() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", &["email"], true).unwrap();
-        db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
+        db.create_index("users", "by_email", &["email"], true)
+            .unwrap();
+        db.put("users", json!({"id": "u1", "email": "a@b.com"}))
+            .unwrap();
 
         // QueryBuilder sees committed data
-        let docs = db.query("users")
+        let docs = db
+            .query("users")
             .where_eq("email", json!("a@b.com"))
             .collect()
             .unwrap();
@@ -3348,7 +3575,8 @@ mod tests {
     fn test_put_doc_and_get_doc() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", &["email"], true).unwrap();
+        db.create_index("users", "by_email", &["email"], true)
+            .unwrap();
 
         let user = TestUser {
             id: "u1".into(),
@@ -3374,7 +3602,10 @@ mod tests {
             name: String,
         }
 
-        let item = Item { id: 42, name: "answer".into() };
+        let item = Item {
+            id: 42,
+            name: "answer".into(),
+        };
         let key = db.put_doc("items", &item).unwrap();
         assert_eq!(key, json!(42));
 
@@ -3412,15 +3643,21 @@ mod tests {
     fn test_collect_doc() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", &["email"], true).unwrap();
+        db.create_index("users", "by_email", &["email"], true)
+            .unwrap();
 
-        db.put_doc("users", &TestUser {
-            id: "u1".into(),
-            name: "Alice".into(),
-            email: "a@b.com".into(),
-        }).unwrap();
+        db.put_doc(
+            "users",
+            &TestUser {
+                id: "u1".into(),
+                name: "Alice".into(),
+                email: "a@b.com".into(),
+            },
+        )
+        .unwrap();
 
-        let users: Vec<TestUser> = db.query("users")
+        let users: Vec<TestUser> = db
+            .query("users")
             .where_eq("email", json!("a@b.com"))
             .collect_doc()
             .unwrap();
@@ -3433,7 +3670,9 @@ mod tests {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
 
-        let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+        let mut tx = db
+            .transaction(&["users"], TransactionMode::ReadWrite)
+            .unwrap();
         let user = TestUser {
             id: "u2".into(),
             name: "Bob".into(),

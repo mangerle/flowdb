@@ -157,9 +157,11 @@ impl InternalRecord {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum SyncMode {
     /// fsync the WAL after every write batch. Maximum durability, lower
     /// throughput (each batch incurs a synchronous disk I/O).
+    #[default]
     Always,
     /// fsync the WAL on a periodic tick (milliseconds). Balances durability
     /// with throughput by coalescing multiple batches into a single fsync.
@@ -167,11 +169,6 @@ pub enum SyncMode {
     IntervalMs(u64),
 }
 
-impl Default for SyncMode {
-    fn default() -> Self {
-        SyncMode::Always
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -271,7 +268,8 @@ impl Config {
         }
         if self.wal_segment_size_mb == 0 {
             return Err(FlowError::Config(
-                "wal_segment_size_mb must be >= 1 (0 causes segment rollover on every write)".into(),
+                "wal_segment_size_mb must be >= 1 (0 causes segment rollover on every write)"
+                    .into(),
             ));
         }
         if self.compaction_threshold == 0 {
@@ -284,13 +282,12 @@ impl Config {
                 "block_cache_capacity_mb must be >= 1".into(),
             ));
         }
-        if let Some(ttl) = self.default_ttl_secs {
-            if ttl == 0 {
+        if let Some(ttl) = self.default_ttl_secs
+            && ttl == 0 {
                 return Err(FlowError::Config(
                     "default_ttl_secs must be > 0 if set (0 = instant expiry)".into(),
                 ));
             }
-        }
         Ok(())
     }
 }

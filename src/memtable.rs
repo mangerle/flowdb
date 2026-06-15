@@ -128,8 +128,12 @@ impl MemTable {
     /// Sort records in-place by (key, ts) with highest seq first for dedup.
     /// Called during freeze.
     pub fn sort(&mut self) {
-        self.records
-            .sort_by(|a, b| a.key.cmp(&b.key).then(a.ts.cmp(&b.ts)).then(b.seq.cmp(&a.seq)));
+        self.records.sort_by(|a, b| {
+            a.key
+                .cmp(&b.key)
+                .then(a.ts.cmp(&b.ts))
+                .then(b.seq.cmp(&a.seq))
+        });
     }
 
     /// Iterate over records in sorted order (call `sort()` first).
@@ -366,19 +370,17 @@ impl MemTables {
     pub fn get(&self, key: &[u8], ts: i64, now_us: i64) -> Option<InternalRecord> {
         {
             let active = self.active.read();
-            if let Some(r) = active.get(key, ts) {
-                if r.expire_at >= now_us {
+            if let Some(r) = active.get(key, ts)
+                && r.expire_at >= now_us {
                     return Some(r.clone());
                 }
-            }
         }
         let frozen = self.frozen.read();
         for mt in frozen.iter() {
-            if let Some(r) = mt.get(key, ts) {
-                if r.expire_at >= now_us {
+            if let Some(r) = mt.get(key, ts)
+                && r.expire_at >= now_us {
                     return Some(r.clone());
                 }
-            }
         }
         None
     }
@@ -655,7 +657,10 @@ mod tests {
         mt.insert(delete);
 
         let result = mt.get(b"a", 100).expect("should find the tombstone");
-        assert_eq!(result.seq, 2, "must return the delete tombstone (highest seq)");
+        assert_eq!(
+            result.seq, 2,
+            "must return the delete tombstone (highest seq)"
+        );
         assert!(
             result.op != crate::record::Op::Put,
             "delete tombstone must win over older Put"

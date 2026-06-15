@@ -138,11 +138,10 @@ impl BlockMetaIndex {
             return None;
         }
         let (_, blocks) = self.sst_blocks.first_key_value()?;
-        if let Some(meta) = Self::binary_search_block(blocks, key) {
-            if !meta.is_expired(now_us) {
+        if let Some(meta) = Self::binary_search_block(blocks, key)
+            && !meta.is_expired(now_us) {
                 return Some((meta.sst_id, meta.block_idx));
             }
-        }
         None
     }
 

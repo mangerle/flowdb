@@ -10,11 +10,7 @@ fn make_temp_dir() -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "flowdb-stress-{}-{}",
-        std::process::id(),
-        id
-    ));
+    let dir = std::env::temp_dir().join(format!("flowdb-stress-{}-{}", std::process::id(), id));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -309,8 +305,7 @@ fn main() {
 
     for &concurrency in &[1usize, 4, 8, 16] {
         let total = 50_000u64;
-        let elapsed =
-            bench_concurrent_writes(engine.clone(), total, concurrency, 50, small_val);
+        let elapsed = bench_concurrent_writes(engine.clone(), total, concurrency, 50, small_val);
         print_result(
             &format!("{} workers, batch=50", concurrency),
             total,
@@ -361,7 +356,6 @@ fn main() {
     for _ in 0..n_q {
         let _ = engine
             .query(Query::key_range("seq_00000000", "seq_00000100"))
-            
             .unwrap();
     }
     let elapsed = start.elapsed();
@@ -466,18 +460,12 @@ mod tests {
 
     #[test]
     fn test_format_duration_millis() {
-        assert_eq!(
-            format_duration(Duration::from_micros(1_500)),
-            "1.5ms"
-        );
+        assert_eq!(format_duration(Duration::from_micros(1_500)), "1.5ms");
     }
 
     #[test]
     fn test_format_duration_secs() {
-        assert_eq!(
-            format_duration(Duration::from_micros(3_500_000)),
-            "3.50s"
-        );
+        assert_eq!(format_duration(Duration::from_micros(3_500_000)), "3.50s");
     }
 
     #[test]

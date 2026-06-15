@@ -512,10 +512,12 @@ mod tests {
             crate::bloom::CURRENT_HASH_VERSION
         );
         // The new bloom should still recognise its keys.
-        assert!(mf2.state().sstables[&7]
-            .bloom
-            .as_ref()
-            .unwrap()
-            .may_contain(b"new"));
+        assert!(
+            mf2.state().sstables[&7]
+                .bloom
+                .as_ref()
+                .unwrap()
+                .may_contain(b"new")
+        );
     }
 }

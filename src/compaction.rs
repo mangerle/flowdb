@@ -374,19 +374,43 @@ mod tests {
     #[test]
     fn test_heap_entry_ordering() {
         let a = InternalRecord {
-            seq: 1, op: Op::Put, key: b"a".to_vec(), ts: 100, expire_at: i64::MAX, value: vec![], range_end: None,
+            seq: 1,
+            op: Op::Put,
+            key: b"a".to_vec(),
+            ts: 100,
+            expire_at: i64::MAX,
+            value: vec![],
+            range_end: None,
         };
         let b = InternalRecord {
-            seq: 2, op: Op::Put, key: b"b".to_vec(), ts: 200, expire_at: i64::MAX, value: vec![], range_end: None,
+            seq: 2,
+            op: Op::Put,
+            key: b"b".to_vec(),
+            ts: 200,
+            expire_at: i64::MAX,
+            value: vec![],
+            range_end: None,
         };
-        let e1 = HeapEntry { record: a.clone(), source: 0 };
-        let e2 = HeapEntry { record: b.clone(), source: 0 };
+        let e1 = HeapEntry {
+            record: a.clone(),
+            source: 0,
+        };
+        let e2 = HeapEntry {
+            record: b.clone(),
+            source: 0,
+        };
         // (key, ts, seq desc) — a.key < b.key, so e1 < e2
         assert!(e1 < e2);
 
         // Same key same ts, higher seq should be "less" (min-heap pops it first)
-        let a2 = InternalRecord { seq: 3, ..a.clone() };
-        let e3 = HeapEntry { record: a2, source: 0 };
+        let a2 = InternalRecord {
+            seq: 3,
+            ..a.clone()
+        };
+        let e3 = HeapEntry {
+            record: a2,
+            source: 0,
+        };
         assert!(e3 < e1, "higher seq should pop first for same key+ts");
     }
 

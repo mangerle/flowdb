@@ -189,7 +189,6 @@ fn fuzz_memtable_query() {
                 all_keys.iter().min().unwrap().clone(),
                 all_keys.iter().max().unwrap().clone(),
             ))
-            
             .unwrap();
         assert!(
             !all_results.is_empty(),
@@ -333,17 +332,13 @@ fn fuzz_block_meta_index_queries() {
             sorted.sort();
             let _ = engine
                 .query_by_key_range(&sorted[0], sorted.last().unwrap())
-                
                 .unwrap();
         }
 
         let _ = engine.query_time_range(0, 1_000_000).unwrap();
 
         if let Some(key) = all_keys.first() {
-            let _ = engine
-                .query_prefix_time_range(key, 0, 1_000_000)
-                
-                .unwrap();
+            let _ = engine.query_prefix_time_range(key, 0, 1_000_000).unwrap();
         }
 
         engine.shutdown().unwrap();

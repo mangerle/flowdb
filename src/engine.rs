@@ -5,7 +5,9 @@ use crate::error::{FlowError, Result};
 use crate::gc::GcRunner;
 use crate::manifest::{Manifest, ManifestEntry};
 use crate::memtable::MemTables;
-use crate::record::{Config, InternalRecord, KeyFilter, Op, Query, ReadOptions, Record, ScanRange, SyncMode};
+use crate::record::{
+    Config, InternalRecord, KeyFilter, Op, Query, ReadOptions, Record, ScanRange, SyncMode,
+};
 use crate::sstable::SstReader;
 use crate::stats::{EngineStats, StatsCounters};
 use crate::wal::Wal;
@@ -182,14 +184,13 @@ impl Engine {
         let mut index = BlockMetaIndex::new(config.time_bucket_secs);
         let state = manifest.state().clone();
         for sst_id in &state.active_sst_ids {
-            if let Some(info) = state.sstables.get(sst_id) {
-                if let Some(blocks) = state.block_infos.get(sst_id) {
+            if let Some(info) = state.sstables.get(sst_id)
+                && let Some(blocks) = state.block_infos.get(sst_id) {
                     index.add_sst(*sst_id, blocks);
                     if let Some(ref bloom) = info.bloom {
                         index.set_bloom(*sst_id, bloom.clone());
                     }
                 }
-            }
         }
 
         // Upgraded bloom hasher migration: any persisted bloom whose
@@ -450,12 +451,7 @@ impl Engine {
         self.query(Query::time_range(start, end))
     }
 
-    pub fn query_prefix_time_range(
-        &self,
-        key: &str,
-        start: i64,
-        end: i64,
-    ) -> Result<Vec<Record>> {
+    pub fn query_prefix_time_range(&self, key: &str, start: i64, end: i64) -> Result<Vec<Record>> {
         self.query(Query::prefix_time_range(key, start, end))
     }
 
@@ -548,12 +544,9 @@ impl Engine {
         ts: i64,
         now_us: i64,
     ) -> Option<Record> {
-        let lo = match records.binary_search_by(|r| {
-            r.key
-                .as_slice()
-                .cmp(key)
-                .then_with(|| r.ts.cmp(&ts))
-        }) {
+        let lo = match records
+            .binary_search_by(|r| r.key.as_slice().cmp(key).then_with(|| r.ts.cmp(&ts)))
+        {
             Ok(idx) => idx,
             Err(_) => return None,
         };
@@ -581,7 +574,9 @@ impl Engine {
         let records: Vec<InternalRecord> = keys_ts
             .iter()
             .enumerate()
-            .map(|(i, (key, ts))| InternalRecord::delete(key.clone().into_bytes(), *ts, base + i as u64))
+            .map(|(i, (key, ts))| {
+                InternalRecord::delete(key.clone().into_bytes(), *ts, base + i as u64)
+            })
             .collect();
 
         self.do_write(records)
@@ -912,7 +907,6 @@ impl Engine {
         }
         self.do_write(recs)
     }
-
 }
 
 /// ScanIterator — lazy merging iterator over memtables + SST blocks
@@ -1233,11 +1227,10 @@ fn filter_sst_block(
         if !matches_key {
             continue;
         }
-        if let Some((ts_start, ts_end)) = time_range {
-            if rec.ts < ts_start || rec.ts > ts_end {
+        if let Some((ts_start, ts_end)) = time_range
+            && (rec.ts < ts_start || rec.ts > ts_end) {
                 continue;
             }
-        }
         filtered.push(InternalRecord {
             seq: 0,
             op: rec.op,
@@ -1266,11 +1259,10 @@ impl Iterator for ScanIterator {
                 }
                 // Skip duplicates (same key, ts) which can occur when a later
                 // Put overwrites an earlier one or a Delete masks a prior Put.
-                if let Some((ref last_key, last_ts)) = self.last_dedup {
-                    if rec.key == *last_key && rec.ts == last_ts {
+                if let Some((ref last_key, last_ts)) = self.last_dedup
+                    && rec.key == *last_key && rec.ts == last_ts {
                         continue;
                     }
-                }
                 self.last_dedup = Some((rec.key.clone(), rec.ts));
                 return Some(Ok(rec.into_record_owned()));
             }
@@ -2085,9 +2077,7 @@ mod tests {
             let engine = Engine::open(make_config(&path)).unwrap();
 
             // First batch — will be flushed
-            engine
-                .write_batch(&[make_record("flushed", 100)])
-                .unwrap();
+            engine.write_batch(&[make_record("flushed", 100)]).unwrap();
             engine.flush().unwrap();
 
             // Second batch — stays in memtable + WAL
@@ -2106,7 +2096,10 @@ mod tests {
             let r1 = engine.get("flushed", 100).unwrap();
             assert!(r1.is_some(), "flushed record must survive restart");
             let r2 = engine.get("post-flush", 200).unwrap();
-            assert!(r2.is_some(), "post-flush record must survive restart (WAL truncation bug check)");
+            assert!(
+                r2.is_some(),
+                "post-flush record must survive restart (WAL truncation bug check)"
+            );
         }
     }
 
@@ -2208,10 +2201,7 @@ mod tests {
         // simulating an upgrade from the legacy ahash-based bloom.
         let manifest_path = dir.path().join("MANIFEST");
         let original = std::fs::read_to_string(&manifest_path).unwrap();
-        let tampered = original.replace(
-            "\"hash_version\":1",
-            "\"hash_version\":0",
-        );
+        let tampered = original.replace("\"hash_version\":1", "\"hash_version\":0");
         // Some blooms may have been written without hash_version (the field
         // was missing in legacy manifests). The replacement above is a no-op
         // if there's nothing to replace, which is fine.
@@ -2311,7 +2301,6 @@ mod tests {
             for (i, rec) in records.iter().enumerate() {
                 let got = engine
                     .get(&String::from_utf8_lossy(&rec.key), rec.ts)
-                    
                     .unwrap();
                 assert!(
                     got.is_some(),
@@ -2422,7 +2411,10 @@ mod tests {
         cfg.data_dir = nonexistent.clone();
         cfg.create_if_missing = false;
         let result = Engine::open(cfg);
-        assert!(result.is_err(), "should fail when dir does not exist and create_if_missing is false");
+        assert!(
+            result.is_err(),
+            "should fail when dir does not exist and create_if_missing is false"
+        );
     }
 
     #[test]
@@ -2448,9 +2440,7 @@ mod tests {
         cfg.wal_sync_mode = SyncMode::IntervalMs(10);
         let engine = Engine::open(cfg).unwrap();
         // Write a record so the flush tick has something to do.
-        engine
-            .write_batch(&[make_record("bg", 1)])
-            .unwrap();
+        engine.write_batch(&[make_record("bg", 1)]).unwrap();
         // Yield to let the maintenance task tick at least once.
         std::thread::sleep(std::time::Duration::from_millis(80));
         engine.shutdown().unwrap();
@@ -2553,7 +2543,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let engine = Engine::open(make_config(dir.path())).unwrap();
         engine
-            .write_batch(&[make_record("gl", 1), make_record("gl", 5), make_record("gl", 3)])
+            .write_batch(&[
+                make_record("gl", 1),
+                make_record("gl", 5),
+                make_record("gl", 3),
+            ])
             .unwrap();
         let latest = engine.get_latest("gl").unwrap().unwrap();
         assert_eq!(latest.ts, 5);
@@ -2583,8 +2577,7 @@ mod tests {
     fn test_patch_missing_record() {
         let dir = TempDir::new().unwrap();
         let engine = Engine::open(make_config(dir.path())).unwrap();
-        let err = engine
-            .patch_record("ghost", 1, Some(b"v".to_vec()), None);
+        let err = engine.patch_record("ghost", 1, Some(b"v".to_vec()), None);
         assert!(err.is_err());
         engine.shutdown().unwrap();
     }
@@ -2594,9 +2587,7 @@ mod tests {
     fn test_patch_value_and_ttl() {
         let dir = TempDir::new().unwrap();
         let engine = Engine::open(make_config(dir.path())).unwrap();
-        engine
-            .write_batch(&[make_record("p", 1)])
-            .unwrap();
+        engine.write_batch(&[make_record("p", 1)]).unwrap();
         let patched = engine
             .patch_record("p", 1, Some(b"new".to_vec()), Some(u32::MAX as u64))
             .unwrap();
@@ -2627,7 +2618,10 @@ mod tests {
             2
         );
         assert_eq!(
-            engine.query_key_time_range("k1", "k2", 0, 100).unwrap().len(),
+            engine
+                .query_key_time_range("k1", "k2", 0, 100)
+                .unwrap()
+                .len(),
             3
         );
         engine.shutdown().unwrap();
@@ -2658,9 +2652,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         {
             let engine = Engine::open(make_config(dir.path())).unwrap();
-            engine
-                .write_batch(&[make_record("persisted", 1)])
-                .unwrap();
+            engine.write_batch(&[make_record("persisted", 1)]).unwrap();
             engine.flush().unwrap();
             engine.shutdown().unwrap();
         }
@@ -2677,9 +2669,7 @@ mod tests {
     fn test_get_sync_after_flush() {
         let dir = TempDir::new().unwrap();
         let engine = Engine::open(make_config(dir.path())).unwrap();
-        engine
-            .write_batch(&[make_record("ss", 7)])
-            .unwrap();
+        engine.write_batch(&[make_record("ss", 7)]).unwrap();
         engine.flush().unwrap();
         let r = engine.get_sync("ss", 7).unwrap();
         assert_eq!(r.value, vec![1, 2, 3]);
@@ -2693,9 +2683,7 @@ mod tests {
         let mut cfg = make_config(dir.path());
         cfg.default_ttl_secs = Some(u32::MAX as u64);
         let engine = Engine::open(cfg).unwrap();
-        engine
-            .write_batch(&[make_record("dttl", 1)])
-            .unwrap();
+        engine.write_batch(&[make_record("dttl", 1)]).unwrap();
         let r = engine.get("dttl", 1).unwrap().unwrap();
         assert!(r.expire_at < i64::MAX);
         engine.shutdown().unwrap();
@@ -2780,9 +2768,7 @@ mod tests {
             }])
             .unwrap();
         // Delete the exact same (key, ts).
-        engine
-            .delete_batch(&[("rd".into(), 100)])
-            .unwrap();
+        engine.delete_batch(&[("rd".into(), 100)]).unwrap();
         // Point lookup must NOT find the deleted record.
         assert!(
             engine.get("rd", 100).unwrap().is_none(),

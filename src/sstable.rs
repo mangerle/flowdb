@@ -307,13 +307,12 @@ impl SstReader {
             block_idx,
         };
 
-        if let Some(cache) = cache {
-            if let Some(cached) = cache.get(&cache_key) {
+        if let Some(cache) = cache
+            && let Some(cached) = cache.get(&cache_key) {
                 return Ok(SstBlock {
                     records: (*cached).clone(),
                 });
             }
-        }
 
         let raw_records = self.read_block_inner(block_idx)?;
 

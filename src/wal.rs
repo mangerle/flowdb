@@ -14,8 +14,7 @@ fn compute_checksum(data: &[u8]) -> [u8; CHECKSUM_LEN] {
     let mut hash: u64 = 0;
     for chunk in data.chunks_exact(8) {
         let val = u64::from_le_bytes([
-            chunk[0], chunk[1], chunk[2], chunk[3],
-            chunk[4], chunk[5], chunk[6], chunk[7],
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
         ]);
         hash = (hash.rotate_left(5) ^ val).wrapping_mul(SEED);
     }
@@ -79,13 +78,11 @@ impl Wal {
         for entry in std::fs::read_dir(&self.dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "wal") {
-                if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
-                    if let Ok(seq) = name.parse::<u64>() {
+            if path.extension().is_some_and(|e| e == "wal")
+                && let Some(name) = path.file_stem().and_then(|n| n.to_str())
+                    && let Ok(seq) = name.parse::<u64>() {
                         entries.push((seq, path));
                     }
-                }
-            }
         }
         entries.sort_by_key(|(seq, _)| *seq);
 
@@ -741,7 +738,10 @@ mod tests {
         // Verify the highest seq always survives.
         assert!(seqs.contains(&20), "seq 20 (latest) must always survive");
         // Very old seqs should be gone.
-        assert!(!seqs.contains(&1), "seq 1 should be gone (was in an old segment)");
+        assert!(
+            !seqs.contains(&1),
+            "seq 1 should be gone (was in an old segment)"
+        );
     }
 
     #[test]

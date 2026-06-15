@@ -18,7 +18,7 @@
 //! without interpreting separators.
 
 use crate::error::{FlowError, Result};
-use crate::record::{increment_prefix_bytes, ScanRange};
+use crate::record::{ScanRange, increment_prefix_bytes};
 use serde_json::Value;
 use std::ops::Bound;
 
@@ -48,8 +48,7 @@ pub(crate) fn doc_prefix(store: &str) -> Vec<u8> {
 }
 
 pub(crate) fn idx_key(store: &str, index: &str, value: &[u8], key: &[u8]) -> Vec<u8> {
-    let mut buf =
-        Vec::with_capacity(3 + store.len() + index.len() + value.len() + key.len());
+    let mut buf = Vec::with_capacity(3 + store.len() + index.len() + value.len() + key.len());
     buf.push(IDX_PREFIX);
     buf.extend_from_slice(store.as_bytes());
     buf.push(SEP);
@@ -323,14 +322,12 @@ mod tests {
 
     #[test]
     fn test_encode_index_value_float_ordering() {
-        let values = vec![
-            json!(-3.14),
+        let values = [json!(-3.14),
             json!(-1.0),
             json!(0.0),
             json!(0.5),
             json!(1.0),
-            json!(3.14),
-        ];
+            json!(3.14)];
         let encoded: Vec<Vec<u8>> = values.iter().map(encode_index_value).collect();
         for i in 0..encoded.len() - 1 {
             assert!(
