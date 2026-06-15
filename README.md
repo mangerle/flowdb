@@ -140,6 +140,27 @@ let docs: Vec<serde_json::Value> = db.query("users")
 let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite)?;
 tx.put("users", json!({"id": "u2", "email": "b@c.com", "age": 25}))?;
 tx.commit()?; // all-or-nothing
+
+// Generic (serde) API — work with typed structs instead of serde_json::Value
+#[derive(serde::Serialize, serde::Deserialize)]
+struct User {
+    id: String,
+    email: String,
+    age: u32,
+}
+
+let alice = User { id: "u3".into(), email: "alice@c.com".into(), age: 28 };
+
+// Insert a typed struct
+db.put_doc("users", &alice)?;
+
+// Retrieve as a typed struct
+let user: Option<User> = db.get_doc("users", "u3")?;
+
+// Query with typed results
+let users: Vec<User> = db.query("users")
+    .where_eq("age", json!(28))
+    .collect_doc()?;
 ```
 
 ## Configuration

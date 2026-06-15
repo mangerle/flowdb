@@ -7,8 +7,8 @@ use crate::sstable::SstWriter;
 use crate::stats::StatsCounters;
 use crate::wal::Wal;
 use parking_lot::{Condvar, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ── WriteWorker (the actual WAL + memtable + flush logic) ────────────
 
@@ -72,38 +72,6 @@ impl WriteWorker {
         let (rec_count, byte_count) = self.memtables.active_stats();
         self.stats.set_memtable(rec_count, byte_count);
         self.stats.set_frozen_count(self.memtables.frozen_count());
-    }
-
-    pub fn process_batch_encoded(
-        &mut self,
-        records: Vec<InternalRecord>,
-        wal_buf: &[u8],
-        mem_bytes: u64,
-        num_records: u64,
-        batch_max_seq: u64,
-        sync_mode: SyncMode,
-    ) -> Result<()> {
-        // Backpressure: if frozen memtables have piled up beyond the limit,
-        // flush them before accepting new writes.
-        while self.memtables.frozen_backpressure() {
-            self.do_flush()?;
-        }
-
-        self.process_batch_inner(records, wal_buf, mem_bytes, num_records, batch_max_seq)?;
-
-        // Durability: if the caller requested synchronous durability,
-        // fsync the WAL immediately so this batch survives a crash.
-        if sync_mode == SyncMode::Always {
-            self.wal.sync_all()?;
-        }
-
-        self.update_stats();
-
-        if self.memtables.should_flush() {
-            self.do_flush()?;
-        }
-
-        Ok(())
     }
 
     /// Process multiple submissions together with a single WAL fsync.

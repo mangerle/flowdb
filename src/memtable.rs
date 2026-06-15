@@ -397,16 +397,18 @@ impl MemTables {
         {
             let active = self.active.read();
             if let Some(r) = active.get(key, ts)
-                && r.expire_at >= now_us {
-                    return Some(r.clone());
-                }
+                && r.expire_at >= now_us
+            {
+                return Some(r.clone());
+            }
         }
         let frozen = self.frozen.read();
         for mt in frozen.iter() {
             if let Some(r) = mt.get(key, ts)
-                && r.expire_at >= now_us {
-                    return Some(r.clone());
-                }
+                && r.expire_at >= now_us
+            {
+                return Some(r.clone());
+            }
         }
         None
     }
@@ -426,7 +428,8 @@ impl MemTables {
                 if let Some(r) = mt.get_latest(key, now_us)
                     && (best.is_none()
                         || r.ts > best.as_ref().unwrap().ts
-                        || (r.ts == best.as_ref().unwrap().ts && r.seq > best.as_ref().unwrap().seq))
+                        || (r.ts == best.as_ref().unwrap().ts
+                            && r.seq > best.as_ref().unwrap().seq))
                 {
                     best = Some(r.clone());
                 }

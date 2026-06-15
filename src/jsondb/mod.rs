@@ -6,9 +6,9 @@
 pub(crate) mod db;
 pub(crate) mod helpers;
 pub(crate) mod query;
-pub(crate) mod transaction;
 #[cfg(test)]
 mod tests;
+pub(crate) mod transaction;
 
 mod encoding;
 mod schema;
@@ -16,9 +16,9 @@ mod schema;
 use serde_json::Value;
 
 pub use db::JsonDB;
+pub use query::{QueryBuilder, SortDir};
 pub use schema::{IndexDef as IndexSchema, StoreDef as StoreSchema};
 pub use transaction::Transaction;
-pub use query::{QueryBuilder, SortDir};
 
 /// Trait for types that can be used as a primary key argument.
 ///
@@ -27,14 +27,46 @@ pub trait KeyArg {
     fn into_value(self) -> Value;
 }
 
-impl KeyArg for &str { fn into_value(self) -> Value { Value::String(self.to_string()) } }
-impl KeyArg for String { fn into_value(self) -> Value { Value::String(self) } }
-impl KeyArg for i64 { fn into_value(self) -> Value { Value::Number(self.into()) } }
-impl KeyArg for i32 { fn into_value(self) -> Value { Value::Number((self as i64).into()) } }
-impl KeyArg for u64 { fn into_value(self) -> Value { Value::Number(self.into()) } }
-impl KeyArg for u32 { fn into_value(self) -> Value { Value::Number((self as u64).into()) } }
-impl KeyArg for Value { fn into_value(self) -> Value { self } }
-impl KeyArg for &Value { fn into_value(self) -> Value { self.clone() } }
+impl KeyArg for &str {
+    fn into_value(self) -> Value {
+        Value::String(self.to_string())
+    }
+}
+impl KeyArg for String {
+    fn into_value(self) -> Value {
+        Value::String(self)
+    }
+}
+impl KeyArg for i64 {
+    fn into_value(self) -> Value {
+        Value::Number(self.into())
+    }
+}
+impl KeyArg for i32 {
+    fn into_value(self) -> Value {
+        Value::Number((self as i64).into())
+    }
+}
+impl KeyArg for u64 {
+    fn into_value(self) -> Value {
+        Value::Number(self.into())
+    }
+}
+impl KeyArg for u32 {
+    fn into_value(self) -> Value {
+        Value::Number((self as u64).into())
+    }
+}
+impl KeyArg for Value {
+    fn into_value(self) -> Value {
+        self
+    }
+}
+impl KeyArg for &Value {
+    fn into_value(self) -> Value {
+        self.clone()
+    }
+}
 
 /// Transaction mode (read-only vs read-write).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

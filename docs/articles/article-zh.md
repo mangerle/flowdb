@@ -4,6 +4,8 @@
 
 ## 一、引言
 
+代码是开源的: https://github.com/restsend/flowdb
+
 在 Rust 生态中，嵌入式数据库的选择一直是个难题。SQLite 虽然强大，但需要 C 绑定和复杂的编译配置；sled 提供了 KV 存储但没有文档模型；IndexedDB 是浏览器标准但无法在原生应用中使用。
 
 FlowDB JsonDB 正是为解决这个问题而生——在 Rust 中原生实现一个 **IndexedDB 兼容的 JSON 文档数据库**，拥有 ACID 事务、二级索引、零 IPC 开销，且 ASYNC FREE。

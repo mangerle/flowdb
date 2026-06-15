@@ -1,15 +1,16 @@
 // ── tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::Config;
-    use crate::jsondb::schema::*;
     use crate::jsondb::encoding::*;
-    
-    use crate::jsondb::{JsonDB, TransactionMode, SortDir};
-    
+    use crate::jsondb::schema::*;
+
+    use crate::jsondb::{JsonDB, SortDir, TransactionMode};
+
     use crate::record::InternalRecord;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::sync::Arc;
     use tempfile::TempDir;
 

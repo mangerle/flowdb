@@ -1,7 +1,7 @@
+use crate::engine::Engine;
 use crate::error::{FlowError, Result};
 use crate::jsondb::encoding::*;
 use crate::jsondb::schema::*;
-use crate::engine::Engine;
 use crate::record::{InternalRecord, Record};
 use serde_json::Value;
 
@@ -151,10 +151,12 @@ pub(crate) fn extract_index_values(doc: &Value, idx: &IndexDef) -> Vec<Vec<Value
     }
 
     // Multi-entry on single-field index: expand array elements
-    if idx.multi_entry && idx.key_paths.len() == 1
-        && let Value::Array(arr) = &raw[0] {
-            return arr.iter().map(|v| vec![v.clone()]).collect();
-        }
+    if idx.multi_entry
+        && idx.key_paths.len() == 1
+        && let Value::Array(arr) = &raw[0]
+    {
+        return arr.iter().map(|v| vec![v.clone()]).collect();
+    }
 
     vec![raw]
 }

@@ -176,9 +176,10 @@ impl<'a> QueryBuilder<'a> {
                     // Early-terminate when limit is set and no sort is needed.
                     if !needs_sort
                         && let Some(target) = limit_target
-                            && results.len() >= target {
-                                break;
-                            }
+                        && results.len() >= target
+                    {
+                        break;
+                    }
                 }
                 results
             }
@@ -191,9 +192,10 @@ impl<'a> QueryBuilder<'a> {
                     results.push(decode_doc(&rec.value)?);
                     // Early-terminate when limit is set.
                     if let Some(target) = limit_target
-                        && results.len() >= target {
-                            break;
-                        }
+                        && results.len() >= target
+                    {
+                        break;
+                    }
                 }
                 results
             }
@@ -205,18 +207,17 @@ impl<'a> QueryBuilder<'a> {
         }
 
         // 4. Sort if needed.
-        if needs_sort
-            && let Some(ref field) = self.order_field {
-                docs.sort_by(|a, b| {
-                    let va = extract_field(a, field).unwrap_or(Value::Null);
-                    let vb = extract_field(b, field).unwrap_or(Value::Null);
-                    let cmp = encode_index_value(&va).cmp(&encode_index_value(&vb));
-                    match self.order_dir {
-                        SortDir::Asc => cmp,
-                        SortDir::Desc => cmp.reverse(),
-                    }
-                });
-            }
+        if needs_sort && let Some(ref field) = self.order_field {
+            docs.sort_by(|a, b| {
+                let va = extract_field(a, field).unwrap_or(Value::Null);
+                let vb = extract_field(b, field).unwrap_or(Value::Null);
+                let cmp = encode_index_value(&va).cmp(&encode_index_value(&vb));
+                match self.order_dir {
+                    SortDir::Asc => cmp,
+                    SortDir::Desc => cmp.reverse(),
+                }
+            });
+        }
 
         // 5. Offset + limit
         let docs: Vec<Value> = docs

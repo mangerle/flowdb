@@ -1,9 +1,9 @@
 use crate::error::{FlowError, Result};
+use crate::jsondb::TransactionMode;
 use crate::jsondb::db::JsonDB;
 use crate::jsondb::encoding::*;
 use crate::jsondb::helpers::*;
 use crate::jsondb::schema::*;
-use crate::jsondb::TransactionMode;
 use crate::record::{InternalRecord, Record, ScanRange};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -106,9 +106,10 @@ impl<'db> Transaction<'db> {
             // Skip if the doc has been deleted in our writes.
             let key_bytes = rec.key[doc_prefix(store).len()..].to_vec();
             if let Some(doc_opt) = self.writes.get(&(store.to_string(), key_bytes))
-                && doc_opt.is_none() {
-                    continue; // deleted
-                }
+                && doc_opt.is_none()
+            {
+                continue; // deleted
+            }
             count += 1;
         }
         // Add buffered puts that aren't in the engine yet.
@@ -137,11 +138,8 @@ impl<'db> Transaction<'db> {
             let rec = r?;
             let key_bytes = rec.key[doc_prefix(store).len()..].to_vec();
             if let Some(doc_opt) = self.writes.get(&(store.to_string(), key_bytes)) {
-                match doc_opt {
-                    Some(bytes) => {
-                        docs.push(decode_doc(bytes)?);
-                    }
-                    None => {} // deleted
+                if let Some(bytes) = doc_opt {
+                    docs.push(decode_doc(bytes)?);
                 }
             } else {
                 docs.push(decode_doc(&rec.value)?);
@@ -153,9 +151,10 @@ impl<'db> Transaction<'db> {
                 continue;
             }
             if let Some(bytes) = doc_opt
-                && self.db.engine.get_bytes(&doc_key(store, k), 0).is_none() {
-                    docs.push(decode_doc(bytes)?);
-                }
+                && self.db.engine.get_bytes(&doc_key(store, k), 0).is_none()
+            {
+                docs.push(decode_doc(bytes)?);
+            }
         }
         Ok(docs)
     }
@@ -191,15 +190,11 @@ impl<'db> Transaction<'db> {
             let key_bytes = &rec.value;
             // Check write buffer.
             if let Some(doc_opt) = self.writes.get(&(store.to_string(), key_bytes.clone())) {
-                match doc_opt {
-                    Some(bytes) => {
-                        let buffered_doc = decode_doc(bytes)?;
-                        // Only include if the buffered doc still matches the query value.
-                        if extract_field(&buffered_doc, first_path) == Some(value.clone()) {
-                            docs.push(buffered_doc);
-                        }
+                if let Some(bytes) = doc_opt {
+                    let buffered_doc = decode_doc(bytes)?;
+                    if extract_field(&buffered_doc, first_path) == Some(value.clone()) {
+                        docs.push(buffered_doc);
                     }
-                    None => {} // deleted
                 }
             } else if let Some(doc) = self.db.engine.get_bytes(&doc_key(store, key_bytes), 0) {
                 docs.push(decode_doc(&doc.value)?);

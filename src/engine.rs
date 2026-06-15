@@ -206,12 +206,13 @@ impl Engine {
         let state = manifest.state().clone();
         for sst_id in &state.active_sst_ids {
             if let Some(info) = state.sstables.get(sst_id)
-                && let Some(blocks) = state.block_infos.get(sst_id) {
-                    index.add_sst(*sst_id, blocks);
-                    if let Some(ref bloom) = info.bloom {
-                        index.set_bloom(*sst_id, bloom.clone());
-                    }
+                && let Some(blocks) = state.block_infos.get(sst_id)
+            {
+                index.add_sst(*sst_id, blocks);
+                if let Some(ref bloom) = info.bloom {
+                    index.set_bloom(*sst_id, bloom.clone());
                 }
+            }
         }
 
         // Upgraded bloom hasher migration: any persisted bloom whose
@@ -942,10 +943,7 @@ impl Engine {
         // Find the record with matching key and max (ts, seq).
         let mut best: Option<&InternalRecord> = None;
         for rec in &records {
-            if rec.key.as_slice() == key
-                && rec.expire_at > now_us
-                && rec.op != Op::Delete
-            {
+            if rec.key.as_slice() == key && rec.expire_at > now_us && rec.op != Op::Delete {
                 match best {
                     None => best = Some(rec),
                     Some(b) => {
@@ -1332,9 +1330,10 @@ fn filter_sst_block(
             continue;
         }
         if let Some((ts_start, ts_end)) = time_range
-            && (rec.ts < ts_start || rec.ts > ts_end) {
-                continue;
-            }
+            && (rec.ts < ts_start || rec.ts > ts_end)
+        {
+            continue;
+        }
         filtered.push(InternalRecord {
             seq: 0,
             op: rec.op,
@@ -1364,9 +1363,11 @@ impl Iterator for ScanIterator {
                 // Skip duplicates (same key, ts) which can occur when a later
                 // Put overwrites an earlier one or a Delete masks a prior Put.
                 if let Some((ref last_key, last_ts)) = self.last_dedup
-                    && rec.key == *last_key && rec.ts == last_ts {
-                        continue;
-                    }
+                    && rec.key == *last_key
+                    && rec.ts == last_ts
+                {
+                    continue;
+                }
                 self.last_dedup = Some((rec.key.clone(), rec.ts));
                 return Some(Ok(rec.into_record_owned()));
             }

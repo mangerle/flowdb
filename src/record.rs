@@ -169,7 +169,6 @@ pub enum SyncMode {
     IntervalMs(u64),
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub data_dir: PathBuf,
@@ -283,11 +282,12 @@ impl Config {
             ));
         }
         if let Some(ttl) = self.default_ttl_secs
-            && ttl == 0 {
-                return Err(FlowError::Config(
-                    "default_ttl_secs must be > 0 if set (0 = instant expiry)".into(),
-                ));
-            }
+            && ttl == 0
+        {
+            return Err(FlowError::Config(
+                "default_ttl_secs must be > 0 if set (0 = instant expiry)".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -705,15 +705,19 @@ mod tests {
 
     #[test]
     fn test_config_validate_ok() {
-        let mut cfg = Config::default();
-        cfg.data_dir = std::env::temp_dir().join("flowdb-validate-ok");
+        let cfg = Config {
+            data_dir: std::env::temp_dir().join("flowdb-validate-ok"),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_ok());
     }
 
     #[test]
     fn test_config_validate_time_bucket_zero() {
-        let mut cfg = Config::default();
-        cfg.time_bucket_secs = 0;
+        let cfg = Config {
+            time_bucket_secs: 0,
+            ..Default::default()
+        };
         assert!(
             cfg.validate().is_err(),
             "time_bucket_secs=0 must be rejected (div-by-zero)"
@@ -722,66 +726,87 @@ mod tests {
 
     #[test]
     fn test_config_validate_memtable_zero() {
-        let mut cfg = Config::default();
-        cfg.memtable_size_mb = 0;
+        let cfg = Config {
+            memtable_size_mb: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_config_validate_max_frozen_zero() {
-        let mut cfg = Config::default();
-        cfg.max_frozen_memtables = 0;
+        let cfg = Config {
+            max_frozen_memtables: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_config_validate_block_size_zero() {
-        let mut cfg = Config::default();
-        cfg.block_size = 0;
+        let cfg = Config {
+            block_size: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_config_validate_zstd_out_of_range() {
-        let mut cfg = Config::default();
-        cfg.zstd_level = 100;
+        let cfg = Config {
+            zstd_level: 100,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
-        cfg.zstd_level = -25;
+        let cfg = Config {
+            zstd_level: -25,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_config_validate_bloom_zero() {
-        let mut cfg = Config::default();
-        cfg.bloom_bits_per_key = 0;
+        let cfg = Config {
+            bloom_bits_per_key: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_config_validate_wal_segment_zero() {
-        let mut cfg = Config::default();
-        cfg.wal_segment_size_mb = 0;
+        let cfg = Config {
+            wal_segment_size_mb: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_config_validate_compaction_threshold_zero() {
-        let mut cfg = Config::default();
-        cfg.compaction_threshold = 0;
+        let cfg = Config {
+            compaction_threshold: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_config_validate_cache_zero() {
-        let mut cfg = Config::default();
-        cfg.block_cache_capacity_mb = 0;
+        let cfg = Config {
+            block_cache_capacity_mb: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_config_validate_ttl_zero() {
-        let mut cfg = Config::default();
-        cfg.default_ttl_secs = Some(0);
+        let cfg = Config {
+            default_ttl_secs: Some(0),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 }

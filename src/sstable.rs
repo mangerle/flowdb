@@ -337,7 +337,11 @@ impl SstStreamWriter {
         self.file.flush()?;
         self.file.sync_all()?;
         self.flushed = true;
-        Ok((self.total_bytes, self.block_infos.clone(), self.bloom.clone()))
+        Ok((
+            self.total_bytes,
+            self.block_infos.clone(),
+            self.bloom.clone(),
+        ))
     }
 
     fn flush_block(&mut self) -> Result<()> {
@@ -356,11 +360,29 @@ impl SstStreamWriter {
 
         let min_ts = self.current_block.iter().map(|r| r.ts).min().unwrap_or(0);
         let max_ts = self.current_block.iter().map(|r| r.ts).max().unwrap_or(0);
-        let min_expire = self.current_block.iter().map(|r| r.expire_at).min().unwrap_or(0);
-        let max_expire = self.current_block.iter().map(|r| r.expire_at).max().unwrap_or(0);
+        let min_expire = self
+            .current_block
+            .iter()
+            .map(|r| r.expire_at)
+            .min()
+            .unwrap_or(0);
+        let max_expire = self
+            .current_block
+            .iter()
+            .map(|r| r.expire_at)
+            .max()
+            .unwrap_or(0);
 
-        let first_key = self.current_block.first().map(|r| r.key.clone()).unwrap_or_default();
-        let last_key = self.current_block.last().map(|r| r.key.clone()).unwrap_or_default();
+        let first_key = self
+            .current_block
+            .first()
+            .map(|r| r.key.clone())
+            .unwrap_or_default();
+        let last_key = self
+            .current_block
+            .last()
+            .map(|r| r.key.clone())
+            .unwrap_or_default();
 
         let header = BlockHeader {
             num_records: self.current_block.len() as u32,
@@ -438,11 +460,12 @@ impl SstReader {
         };
 
         if let Some(cache) = cache
-            && let Some(cached) = cache.get(&cache_key) {
-                return Ok(SstBlock {
-                    records: (*cached).clone(),
-                });
-            }
+            && let Some(cached) = cache.get(&cache_key)
+        {
+            return Ok(SstBlock {
+                records: (*cached).clone(),
+            });
+        }
 
         let raw_records = self.read_block_inner(block_idx)?;
 
@@ -666,8 +689,7 @@ mod tests {
     fn test_sst_stream_writer_empty() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("empty.sst");
-        let mut writer =
-            SstStreamWriter::new(&path, 10, 3, 0, 10, false).unwrap();
+        let writer = SstStreamWriter::new(&path, 10, 3, 0, 10, false).unwrap();
         let (bytes, blocks, _bloom) = writer.finish().unwrap();
         assert_eq!(bytes, 0, "empty writer produces zero bytes");
         assert!(blocks.is_empty());
@@ -678,8 +700,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("single.sst");
         let records = make_records(5);
-        let mut writer =
-            SstStreamWriter::new(&path, 100, 3, 5, 10, false).unwrap();
+        let mut writer = SstStreamWriter::new(&path, 100, 3, 5, 10, false).unwrap();
         for rec in &records {
             writer.write_record(rec).unwrap();
         }
@@ -695,7 +716,11 @@ mod tests {
         assert_eq!(block.records[0].key, b"key_0000");
         // The bloom must recognise the inserted keys.
         for rec in &records {
-            assert!(bloom.may_contain(&rec.key), "bloom must contain {}", String::from_utf8_lossy(&rec.key));
+            assert!(
+                bloom.may_contain(&rec.key),
+                "bloom must contain {}",
+                String::from_utf8_lossy(&rec.key)
+            );
         }
     }
 
@@ -705,8 +730,7 @@ mod tests {
         let path = dir.path().join("multi.sst");
         let records = make_records(25);
         // block_size = 10 → 3 blocks (10 + 10 + 5)
-        let mut writer =
-            SstStreamWriter::new(&path, 10, 3, 25, 10, false).unwrap();
+        let mut writer = SstStreamWriter::new(&path, 10, 3, 25, 10, false).unwrap();
         for rec in &records {
             writer.write_record(rec).unwrap();
         }

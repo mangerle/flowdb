@@ -80,9 +80,10 @@ impl Wal {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "wal")
                 && let Some(name) = path.file_stem().and_then(|n| n.to_str())
-                    && let Ok(seq) = name.parse::<u64>() {
-                        entries.push((seq, path));
-                    }
+                && let Ok(seq) = name.parse::<u64>()
+            {
+                entries.push((seq, path));
+            }
         }
         entries.sort_by_key(|(seq, _)| *seq);
 

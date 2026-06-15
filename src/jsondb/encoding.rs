@@ -321,13 +321,16 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_encode_index_value_float_ordering() {
-        let values = [json!(-3.14),
+        let values = [
+            json!(-3.14),
             json!(-1.0),
             json!(0.0),
             json!(0.5),
             json!(1.0),
-            json!(3.14)];
+            json!(3.14),
+        ];
         let encoded: Vec<Vec<u8>> = values.iter().map(encode_index_value).collect();
         for i in 0..encoded.len() - 1 {
             assert!(

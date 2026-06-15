@@ -140,9 +140,10 @@ impl BlockMetaIndex {
         }
         let (_, blocks) = self.sst_blocks.first_key_value()?;
         if let Some(meta) = Self::binary_search_block(blocks, key)
-            && !meta.is_expired(now_us) {
-                return Some((meta.sst_id, meta.block_idx));
-            }
+            && !meta.is_expired(now_us)
+        {
+            return Some((meta.sst_id, meta.block_idx));
+        }
         None
     }
 
@@ -240,8 +241,6 @@ impl BlockMetaIndex {
     pub fn total_entries(&self) -> usize {
         self.by_key.values().map(|v| v.len()).sum()
     }
-
-
 
     pub fn bucket_count(&self) -> usize {
         self.by_time.len()

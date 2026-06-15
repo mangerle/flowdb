@@ -112,7 +112,10 @@ impl CompactionRunner {
             .iter()
             .filter_map(|id| {
                 let mf = self.manifest.lock();
-                mf.state().sstables.get(id).map(|info| info.records as usize)
+                mf.state()
+                    .sstables
+                    .get(id)
+                    .map(|info| info.records as usize)
             })
             .sum();
 
