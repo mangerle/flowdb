@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 480" font-family="'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f8f9fa"/><stop offset="100%" stop-color="#e9ecef"/></linearGradient>
+    <marker id="a" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10" fill="#495057"/></marker>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#bg)" rx="10"/>
+
+  <!-- Title -->
+  <text x="450" y="30" text-anchor="middle" font-size="16" font-weight="bold" fill="#212529">FlowDB Architecture</text>
+
+  <!-- Write Path -->
+  <rect x="30" y="55" width="200" height="40" rx="6" fill="#339af0"/>
+  <text x="130" y="80" text-anchor="middle" font-size="12" font-weight="bold" fill="white">Client API</text>
+
+  <rect x="30" y="110" width="200" height="35" rx="6" fill="#51cf66"/>
+  <text x="130" y="132" text-anchor="middle" font-size="11" font-weight="bold" fill="white">WriteWorker (Mutex)</text>
+
+  <rect x="30" y="160" width="95" height="35" rx="6" fill="#2b8a3e"/>
+  <text x="77" y="182" text-anchor="middle" font-size="11" fill="white">WAL</text>
+  <rect x="135" y="160" width="95" height="35" rx="6" fill="#2f9e44"/>
+  <text x="182" y="182" text-anchor="middle" font-size="11" fill="white">MemTable</text>
+
+  <rect x="30" y="215" width="200" height="35" rx="6" fill="#fa5252"/>
+  <text x="130" y="237" text-anchor="middle" font-size="11" font-weight="bold" fill="white">SST (lz4/zstd)</text>
+
+  <line x1="130" y1="95" x2="130" y2="108" stroke="#495057" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="77" y1="145" x2="77" y2="158" stroke="#495057" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="182" y1="145" x2="182" y2="158" stroke="#495057" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="130" y1="195" x2="130" y2="213" stroke="#495057" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Read Path -->
+  <rect x="280" y="55" width="180" height="40" rx="6" fill="#fcc419"/>
+  <text x="370" y="80" text-anchor="middle" font-size="12" font-weight="bold" fill="#495057">Query / Scan</text>
+
+  <rect x="280" y="110" width="85" height="35" rx="6" fill="#e67700"/>
+  <text x="322" y="132" text-anchor="middle" font-size="11" font-weight="bold" fill="white">MemTable</text>
+  <rect x="375" y="110" width="85" height="35" rx="6" fill="#e8590c"/>
+  <text x="417" y="132" text-anchor="middle" font-size="11" font-weight="bold" fill="white">SST+Bloom</text>
+
+  <rect x="280" y="160" width="180" height="35" rx="6" fill="#d9480f"/>
+  <text x="370" y="182" text-anchor="middle" font-size="11" font-weight="bold" fill="white">ScanIterator (Merge)</text>
+
+  <line x1="370" y1="95" x2="322" y2="108" stroke="#495057" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="370" y1="95" x2="417" y2="108" stroke="#495057" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="322" y1="145" x2="322" y2="158" stroke="#495057" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="417" y1="145" x2="370" y2="158" stroke="#495057" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Background -->
+  <rect x="530" y="55" width="150" height="40" rx="6" fill="#7950f2"/>
+  <text x="605" y="80" text-anchor="middle" font-size="12" font-weight="bold" fill="white">BG Thread</text>
+
+  <rect x="530" y="110" width="70" height="30" rx="4" fill="#845ef7"/>
+  <text x="565" y="130" text-anchor="middle" font-size="10" fill="white">Flush</text>
+  <rect x="608" y="110" width="70" height="30" rx="4" fill="#9775fa"/>
+  <text x="643" y="130" text-anchor="middle" font-size="10" fill="white">Compact</text>
+  <rect x="530" y="148" width="148" height="30" rx="4" fill="#b197fc"/>
+  <text x="604" y="168" text-anchor="middle" font-size="10" fill="white">GC / WAL Sync</text>
+
+  <line x1="230" y1="232" x2="565" y2="148" stroke="#495057" stroke-width="1" marker-end="url(#a)" stroke-dasharray="4,2"/>
+
+  <!-- Go to top -->
+  <line x1="605" y1="55" x2="370" y2="55" stroke="#495057" stroke-width="1" marker-end="url(#a)" stroke-dasharray="4,2"/>
+  <text x="490" y="50" text-anchor="middle" font-size="9" fill="#868e96">trigger flush</text>
+
+  <!-- JsonDB Layer -->
+  <rect x="30" y="275" width="840" height="105" rx="8" fill="white" stroke="#adb5bd"/>
+  <text x="450" y="298" text-anchor="middle" font-size="14" font-weight="bold" fill="#212529">JsonDB Document Layer</text>
+
+  <rect x="50" y="310" width="240" height="55" rx="6" fill="#e7f5ff" stroke="#339af0"/>
+  <text x="170" y="330" text-anchor="middle" font-size="12" font-weight="bold" fill="#339af0">API</text>
+  <text x="170" y="350" text-anchor="middle" font-size="10" fill="#495057">put / get / delete / transaction</text>
+  <text x="170" y="362" text-anchor="middle" font-size="10" fill="#495057">get_by_index / range_by_index</text>
+
+  <rect x="320" y="310" width="240" height="55" rx="6" fill="#fff3bf" stroke="#fab005"/>
+  <text x="440" y="330" text-anchor="middle" font-size="12" font-weight="bold" fill="#e67700">QueryBuilder</text>
+  <text x="440" y="350" text-anchor="middle" font-size="10" fill="#495057">where_eq + where_range + order_by</text>
+  <text x="440" y="362" text-anchor="middle" font-size="10" fill="#495057">limit / offset / collect / collect_doc</text>
+
+  <rect x="590" y="310" width="260" height="55" rx="6" fill="#ebfbee" stroke="#51cf66"/>
+  <text x="720" y="330" text-anchor="middle" font-size="12" font-weight="bold" fill="#2b8a3e">Durability</text>
+  <text x="720" y="350" text-anchor="middle" font-size="10" fill="#495057">WAL + Checksum + fsync</text>
+  <text x="720" y="362" text-anchor="middle" font-size="10" fill="#495057">Manifest (append-only JSON)</text>
+
+  <!-- Bottom notes -->
+  <rect x="30" y="395" width="840" height="70" rx="6" fill="#fff5f5" stroke="#ffc9c9"/>
+  <text x="450" y="418" text-anchor="middle" font-size="12" font-weight="bold" fill="#c92a2a">Key Encoding</text>
+  <text x="50" y="440" font-size="11" fill="#495057">Document: D\x00{store}\x00{pk}     Index: I\x00{store}\x00{index}\x00{enc(val)}\x00{pk}</text>
+  <text x="50" y="458" font-size="11" fill="#495057">Composite: I\x00s\x00i\x00{enc(v1)}\x00{enc(v2)}\x00{pk}     Schema: S\x00{store}     Counter: C\x00{store}</text>
+</svg>

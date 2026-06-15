@@ -1,0 +1,564 @@
+use crate::engine::Engine;
+use crate::error::{FlowError, Result};
+use crate::jsondb::encoding::*;
+use crate::jsondb::helpers::*;
+use crate::jsondb::query::QueryBuilder;
+use crate::jsondb::schema::*;
+use crate::jsondb::{KeyArg, Transaction, TransactionMode};
+use crate::record::{Config, InternalRecord, Record, ScanRange};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::fmt;
+use std::ops::Bound;
+
+// ── JsonDB ───────────────────────────────────────────────────────
+
+/// A JSON document database built on top of a single FlowDB instance.
+///
+/// Every document operation is ACID — document writes and secondary-index
+/// updates are applied atomically.  Explicit [`Transaction`]s group multiple
+/// operations into a single atomic batch.
+///
+/// # Example
+///
+/// ```no_run
+/// use flowdb::jsondb::{JsonDB, TransactionMode};
+/// use serde_json::json;
+///
+/// let db = JsonDB::open(Default::default()).unwrap();
+/// db.create_object_store("users", "id").unwrap();
+/// db.create_index("users", "by_email", &["email"], true).unwrap();
+///
+/// db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
+/// let doc = db.get("users", &json!("u1")).unwrap();
+///
+/// let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+/// tx.put("users", json!({"id": "u2", "email": "c@d.com"})).unwrap();
+/// tx.commit().unwrap();
+/// ```
+pub struct JsonDB {
+    pub(crate) engine: Engine,
+    pub(crate) schema: Schema,
+    // Serialises read-modify-write operations (put, delete, put_auto) so
+    // concurrent threads don't compute stale index maintenance from the
+    // same old-document snapshot.
+    write_lock: std::sync::Mutex<()>,
+}
+
+impl fmt::Debug for JsonDB {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JsonDB")
+            .field("store_names", &self.store_names())
+            .finish()
+    }
+}
+
+impl JsonDB {
+    /// Open a JsonDB backed by a FlowDB engine at `config.data_dir`.
+    pub fn open(config: Config) -> Result<Self> {
+        let engine = Engine::open(config)?;
+        Self::from_engine(engine)
+    }
+
+    /// Wrap an already-open FlowDB [`Engine`] with a JsonDB layer.
+    ///
+    /// Schemas are loaded lazily on first use and cached.
+    pub fn from_engine(engine: Engine) -> Result<Self> {
+        let schema = load_schemas(|range| {
+            let iter = engine.scan(range)?;
+            iter.collect()
+        })?;
+        Ok(Self {
+            engine,
+            schema,
+            write_lock: std::sync::Mutex::new(()),
+        })
+    }
+
+    /// Shut down the underlying engine.
+    pub fn shutdown(self) -> Result<()> {
+        self.engine.shutdown()
+    }
+
+    /// Close (flush) without consuming.
+    pub fn close(&self) -> Result<()> {
+        self.engine.close()
+    }
+
+    /// Access the underlying FlowDB engine.
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
+    // ── schema management ─────────────────────────────────────────
+
+    /// Create a new object store.
+    ///
+    /// `key_path` is a dotted field path (e.g. `"id"` or `"user.id"`) that
+    /// identifies the primary key within each document.
+    pub fn create_object_store(&self, name: &str, key_path: &str) -> Result<()> {
+        validate_store_def(name, key_path)?;
+
+        let mut def = self.schema.get(name);
+
+        match &mut def {
+            Some(d) => {
+                // Store already exists – update key_path if it matches.
+                if d.key_path != key_path {
+                    return Err(FlowError::JsonDb(format!(
+                        "store '{}' already exists with a different key_path",
+                        name
+                    )));
+                }
+                // Already exists with identical definition – no-op.
+                Ok(())
+            }
+            None => {
+                let entry = StoreDef {
+                    name: name.to_string(),
+                    key_path: key_path.to_string(),
+                    auto_increment: false,
+                    indexes: vec![],
+                    next_auto_id: 0,
+                };
+                self.engine
+                    .write_internal(vec![InternalRecord::from_record(
+                        &schema_record(&entry)?,
+                        0,
+                    )])?;
+                self.schema.insert(entry);
+                Ok(())
+            }
+        }
+    }
+
+    /// Delete an object store (all documents, indexes, and schema).
+    pub fn delete_object_store(&self, name: &str) -> Result<()> {
+        let def = self.schema.get(name);
+        if def.is_none() {
+            return Err(FlowError::JsonDb(format!("store '{}' not found", name)));
+        }
+        let def = def.unwrap();
+
+        // Range-delete all documents and index entries.
+        let doc_pfx = doc_prefix(name);
+
+        let mut records = Vec::new();
+
+        // Delete all index entries for each index.
+        for index in &def.indexes {
+            let pfx = idx_prefix(name, &index.name);
+            let end = crate::record::increment_prefix_bytes(&pfx);
+            records.push(InternalRecord::delete_range(pfx, end, 0));
+        }
+
+        // Delete all documents.
+        let doc_end = crate::record::increment_prefix_bytes(&doc_pfx);
+        records.push(InternalRecord::delete_range(doc_pfx, doc_end, 0));
+
+        // Delete schema.
+        records.push(schema_delete_record(name));
+
+        // Delete counter.
+        records.push(InternalRecord::delete(counter_key(name), 0, 0));
+
+        self.engine.write_internal(records)?;
+        self.schema.remove(name);
+        Ok(())
+    }
+
+    /// Create a secondary index on an existing object store.
+    ///
+    /// `key_paths` can be one or more field paths (e.g. `&["email"]` for a
+    /// single-field index or `&["city", "age"]` for a composite index).
+    /// Composite indexes enable efficient multi-field queries via
+    /// [`QueryBuilder`].
+    pub fn create_index(
+        &self,
+        store: &str,
+        name: &str,
+        key_paths: &[&str],
+        unique: bool,
+    ) -> Result<()> {
+        let mut def = self
+            .schema
+            .get(store)
+            .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", store)))?;
+        validate_index_def(&def, name, key_paths)?;
+
+        let index = IndexDef {
+            name: name.to_string(),
+            key_paths: key_paths.iter().map(|s| s.to_string()).collect(),
+            unique,
+            multi_entry: false,
+        };
+
+        def.indexes.push(index.clone());
+
+        // Build a single atomic batch: schema + all index entries for
+        // existing documents.  This ensures consistency — if the write
+        // fails, neither the schema nor any entries are committed.
+        let mut records = Vec::new();
+        records.push(InternalRecord::from_record(&schema_record(&def)?, 0));
+
+        let doc_pfx = doc_prefix(store);
+        let docs = self.engine.scan(prefix_range(&doc_pfx))?;
+        for rec in docs {
+            let doc = decode_doc(&rec?.value)?;
+            let index_vals = extract_index_values(&doc, &index);
+            for vals in index_vals {
+                let key_bytes =
+                    encode_primary_key(&extract_field(&doc, &def.key_path).unwrap_or(Value::Null))?;
+                let encoded = encode_composite_value(&vals);
+                records.push(InternalRecord::from_record(
+                    &Record::new(
+                        idx_key(store, name, &encoded, &key_bytes),
+                        0,
+                        key_bytes.clone(),
+                    ),
+                    0,
+                ));
+            }
+        }
+        self.engine.write_internal(records)?;
+
+        self.schema.insert(def);
+        Ok(())
+    }
+
+    /// Convenience: create a single-field index.  Equivalent to
+    /// `create_index(store, name, &[key_path], unique)`.
+    pub fn create_index_on(
+        &self,
+        store: &str,
+        name: &str,
+        key_path: &str,
+        unique: bool,
+    ) -> Result<()> {
+        self.create_index(store, name, &[key_path], unique)
+    }
+
+    /// Delete a secondary index (removes all index entries).
+    pub fn delete_index(&self, store: &str, name: &str) -> Result<()> {
+        let mut def = self
+            .schema
+            .get(store)
+            .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", store)))?;
+
+        let pos = def.indexes.iter().position(|i| i.name == name);
+        if pos.is_none() {
+            return Err(FlowError::JsonDb(format!(
+                "index '{}' not found on store '{}'",
+                name, store
+            )));
+        }
+        def.indexes.remove(pos.unwrap());
+
+        // Delete all index entries.
+        let pfx = idx_prefix(store, name);
+        let end = crate::record::increment_prefix_bytes(&pfx);
+        let mut records = vec![InternalRecord::delete_range(pfx, end, 0)];
+        records.push(InternalRecord::from_record(&schema_record(&def)?, 0));
+
+        self.engine.write_internal(records)?;
+        self.schema.insert(def);
+        Ok(())
+    }
+
+    /// List all store names.
+    pub fn store_names(&self) -> Vec<String> {
+        self.schema.list().into_iter().map(|s| s.name).collect()
+    }
+
+    /// Get a store definition.
+    pub fn get_store(&self, name: &str) -> Option<StoreDef> {
+        self.schema.get(name)
+    }
+
+    // ── direct document operations (implicit transaction) ─────────
+
+    /// Insert or update a document.
+    ///
+    /// The document **must** contain the store's `key_path` field.
+    /// Returns the extracted primary key value.
+    pub fn put(&self, store: &str, doc: Value) -> Result<Value> {
+        let _lock = self.write_lock.lock().unwrap();
+        let def = self
+            .schema
+            .get(store)
+            .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", store)))?;
+        let key_val = extract_field(&doc, &def.key_path).ok_or_else(|| {
+            FlowError::JsonDb(format!(
+                "document missing key_path '{}' for store '{}'",
+                def.key_path, store
+            ))
+        })?;
+        let key_bytes = encode_primary_key(&key_val)?;
+        let doc_bytes = encode_doc(&doc)?;
+
+        let batch = build_put_batch(&def, store, &key_bytes, &doc_bytes, &doc, &self.engine)?;
+        self.engine.write_internal(batch)?;
+        Ok(key_val)
+    }
+
+    /// Retrieve a document by primary key.
+    pub fn get(&self, store: &str, key: &Value) -> Result<Option<Value>> {
+        let _def = self
+            .schema
+            .get(store)
+            .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", store)))?;
+        let key_bytes = encode_primary_key(key)?;
+        let rec = self.engine.get_bytes(&doc_key(store, &key_bytes), 0);
+        match rec {
+            Some(r) => Ok(Some(decode_doc(&r.value)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Delete a document by primary key (and all associated index entries).
+    pub fn delete(&self, store: &str, key: &Value) -> Result<()> {
+        let _lock = self.write_lock.lock().unwrap();
+        let def = self
+            .schema
+            .get(store)
+            .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", store)))?;
+        let key_bytes = encode_primary_key(key)?;
+
+        let batch = build_delete_batch(&def, store, &key_bytes, &self.engine)?;
+        self.engine.write_internal(batch)?;
+        Ok(())
+    }
+
+    /// Insert a document with auto-generated key (for auto-increment stores).
+    ///
+    /// Returns the assigned key value.
+    pub fn put_auto(&self, store: &str, mut doc: Value) -> Result<Value> {
+        let _lock = self.write_lock.lock().unwrap();
+        let def = self
+            .schema
+            .get(store)
+            .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", store)))?;
+        if !def.auto_increment {
+            return Err(FlowError::JsonDb(format!(
+                "store '{}' is not auto-increment",
+                store
+            )));
+        }
+
+        let (next_id, counter_rec) = prepare_counter(&self.engine, store)?;
+        let key_val = Value::Number(next_id.into());
+        let key_bytes = next_id.to_string().into_bytes();
+
+        // Inject the auto key into the document.
+        if let Value::Object(ref mut map) = doc {
+            map.insert(def.key_path.clone(), key_val.clone());
+        }
+
+        let doc_bytes = encode_doc(&doc)?;
+        let mut batch = build_put_batch(&def, store, &key_bytes, &doc_bytes, &doc, &self.engine)?;
+        batch.push(counter_rec); // atomic: counter + doc + index entries
+        self.engine.write_internal(batch)?;
+        Ok(key_val)
+    }
+
+    /// Count documents in a store.
+    pub fn count(&self, store: &str) -> Result<usize> {
+        let _ = self
+            .schema
+            .get(store)
+            .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", store)))?;
+        let pfx = doc_prefix(store);
+        let iter = self.engine.scan(prefix_range(&pfx))?;
+        let mut count = 0;
+        for r in iter {
+            let _ = r?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Retrieve all documents in a store.
+    pub fn scan(&self, store: &str) -> Result<Vec<Value>> {
+        let _ = self
+            .schema
+            .get(store)
+            .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", store)))?;
+        let pfx = doc_prefix(store);
+        let iter = self.engine.scan(prefix_range(&pfx))?;
+        let mut docs = Vec::new();
+        for r in iter {
+            let rec = r?;
+            docs.push(decode_doc(&rec.value)?);
+        }
+        Ok(docs)
+    }
+
+    /// Look up documents by an exact index value.
+    pub fn get_by_index(&self, store: &str, index: &str, value: &Value) -> Result<Vec<Value>> {
+        let _def = self
+            .schema
+            .get(store)
+            .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", store)))?;
+        let idx_def = _def
+            .indexes
+            .iter()
+            .find(|i| i.name == index)
+            .ok_or_else(|| {
+                FlowError::JsonDb(format!("index '{}' not found on '{}'", index, store))
+            })?;
+        let is_composite = idx_def.key_paths.len() > 1;
+
+        let encoded = if is_composite {
+            // Multi-field index: accept array ["v1","v2"] for full match,
+            // or single value for prefix scan on first field.
+            match value {
+                Value::Array(arr) => encode_composite_value(arr),
+                _ => encode_index_value(value),
+            }
+        } else {
+            encode_index_value(value)
+        };
+
+        let pfx = idx_value_prefix(store, index, &encoded);
+        let iter = self.engine.scan(prefix_range(&pfx))?;
+        let mut docs = Vec::new();
+        for r in iter {
+            let rec = r?;
+            if let Some(doc) = self.engine.get_bytes(&doc_key(store, &rec.value), 0) {
+                docs.push(decode_doc(&doc.value)?);
+            }
+        }
+        Ok(docs)
+    }
+
+    /// Look up documents by a range of index values `[start, end)`.
+    ///
+    /// The range is **exclusive** of `end`.
+    pub fn range_by_index(
+        &self,
+        store: &str,
+        index: &str,
+        start: &Value,
+        end: &Value,
+    ) -> Result<Vec<Value>> {
+        let _def = self
+            .schema
+            .get(store)
+            .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", store)))?;
+        let idx_def = _def
+            .indexes
+            .iter()
+            .find(|i| i.name == index)
+            .ok_or_else(|| {
+                FlowError::JsonDb(format!("index '{}' not found on '{}'", index, store))
+            })?;
+        let is_composite = idx_def.key_paths.len() > 1;
+
+        let enc_start = if is_composite {
+            match start {
+                Value::Array(arr) => encode_composite_value(arr),
+                _ => encode_index_value(start),
+            }
+        } else {
+            encode_index_value(start)
+        };
+        let enc_end = if is_composite {
+            match end {
+                Value::Array(arr) => encode_composite_value(arr),
+                _ => encode_index_value(end),
+            }
+        } else {
+            encode_index_value(end)
+        };
+
+        let pfx = idx_prefix(store, index);
+        let range = ScanRange {
+            key_start: Bound::Included([pfx.as_slice(), &enc_start].concat()),
+            key_end: Bound::Excluded([pfx.as_slice(), &enc_end].concat()),
+            ts_start: Bound::Unbounded,
+            ts_end: Bound::Unbounded,
+        };
+
+        let iter = self.engine.scan(range)?;
+        let mut docs = Vec::new();
+        for r in iter {
+            let rec = r?;
+            if let Some(doc) = self.engine.get_bytes(&doc_key(store, &rec.value), 0) {
+                docs.push(decode_doc(&doc.value)?);
+            }
+        }
+        Ok(docs)
+    }
+
+    // ── explicit transactions ──────────────────────────────────────
+
+    /// Begin an explicit transaction over the given stores.
+    ///
+    /// Call [`Transaction::commit`] to apply buffered writes atomically.
+    /// Dropping the transaction without calling `commit` discards all writes.
+    pub fn transaction<'db>(
+        &'db self,
+        stores: &[&str],
+        mode: TransactionMode,
+    ) -> Result<Transaction<'db>> {
+        // Validate all stores exist.
+        for name in stores {
+            if self.schema.get(name).is_none() {
+                return Err(FlowError::JsonDb(format!("store '{}' not found", name)));
+            }
+        }
+        Ok(Transaction {
+            db: self,
+            mode,
+            writes: HashMap::new(),
+            counter_updates: Vec::new(),
+            next_ids: HashMap::new(),
+            committed: false,
+        })
+    }
+
+    /// Create a [`QueryBuilder`] for the given store.
+    pub fn query<'a>(&'a self, store: &'a str) -> QueryBuilder<'a> {
+        QueryBuilder::new(self, store)
+    }
+
+    // ── generic document API (struct-based) ──────────────────────
+
+    /// Insert or update a document of any `Serialize` type.
+    ///
+    /// The type **must** have a field matching the store's `key_path`.
+    /// Returns the extracted primary key value.
+    ///
+    /// ```ignore
+    /// db.put_doc("users", &User { id: "u1".into(), name: "Alice".into() })?;
+    /// ```
+    pub fn put_doc<T: serde::Serialize>(&self, store: &str, doc: &T) -> Result<Value> {
+        let json = serde_json::to_value(doc).map_err(FlowError::from)?;
+        self.put(store, json)
+    }
+
+    /// Retrieve a document by primary key, deserialized to `T`.
+    ///
+    /// ```ignore
+    /// let user: User = db.get_doc("users", "u1")?.unwrap();
+    /// ```
+    pub fn get_doc<T: serde::de::DeserializeOwned>(
+        &self,
+        store: &str,
+        key: impl KeyArg,
+    ) -> Result<Option<T>> {
+        let val = self.get(store, &key.into_value())?;
+        match val {
+            Some(v) => {
+                let t: T = serde_json::from_value(v).map_err(FlowError::from)?;
+                Ok(Some(t))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Delete a document by primary key, accepting any `KeyArg` type.
+    pub fn delete_doc(&self, store: &str, key: impl KeyArg) -> Result<()> {
+        self.delete(store, &key.into_value())
+    }
+}

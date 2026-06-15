@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 700" font-family="'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f8f9fa"/>
+      <stop offset="100%" stop-color="#e9ecef"/>
+    </linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#bg)" rx="12"/>
+
+  <text x="500" y="35" text-anchor="middle" font-size="22" font-weight="bold" fill="#212529">Benchmark: FlowDB vs RocksDB (LSM Engine)</text>
+  <text x="500" y="55" text-anchor="middle" font-size="13" fill="#868e96">100K records, 128B values, batch=100, release build, Apple M-series</text>
+
+  <!-- Bar chart -->
+  <g transform="translate(80, 80)">
+    <!-- Y axis -->
+    <line x1="0" y1="0" x2="0" y2="420" stroke="#adb5bd" stroke-width="2"/>
+    <!-- X axis -->
+    <line x1="0" y1="420" x2="880" y2="420" stroke="#adb5bd" stroke-width="2"/>
+
+    <!-- Y labels -->
+    <text x="-10" y="420" text-anchor="end" font-size="11" fill="#868e96">0</text>
+    <text x="-10" y="295" text-anchor="end" font-size="11" fill="#868e96">2M</text>
+    <line x1="0" y1="290" x2="880" y2="290" stroke="#dee2e6" stroke-width="0.5" stroke-dasharray="4,3"/>
+    <text x="-10" y="170" text-anchor="end" font-size="11" fill="#868e96">4M</text>
+    <line x1="0" y1="165" x2="880" y2="165" stroke="#dee2e6" stroke-width="0.5" stroke-dasharray="4,3"/>
+    <text x="-10" y="45" text-anchor="end" font-size="11" fill="#868e96">6M</text>
+    <line x1="0" y1="40" x2="880" y2="40" stroke="#dee2e6" stroke-width="0.5" stroke-dasharray="4,3"/>
+    <text x="-10" y="20" text-anchor="end" font-size="11" fill="#868e96">9.4M</text>
+
+    <!-- Category 1: Sequential Write -->
+    <rect x="40" y="290" width="160" height="130" rx="3" fill="#339af0"/>
+    <text x="120" y="282" text-anchor="middle" font-size="11" font-weight="bold" fill="#339af0">4.5M</text>
+    <rect x="40" y="340" width="160" height="80" rx="3" fill="#adb5bd"/>
+    <text x="120" y="332" text-anchor="middle" font-size="11" font-weight="bold" fill="#868e96">3.1M</text>
+    <text x="120" y="445" text-anchor="middle" font-size="11" fill="#495057">Sequential</text>
+    <text x="120" y="460" text-anchor="middle" font-size="11" fill="#495057">Write</text>
+
+    <!-- Category 2: Concurrent Write -->
+    <rect x="250" y="140" width="160" height="280" rx="3" fill="#339af0"/>
+    <text x="330" y="132" text-anchor="middle" font-size="11" font-weight="bold" fill="#339af0">9.4M</text>
+    <rect x="250" y="280" width="160" height="140" rx="3" fill="#adb5bd"/>
+    <text x="330" y="272" text-anchor="middle" font-size="11" font-weight="bold" fill="#868e96">4.7M</text>
+    <text x="330" y="445" text-anchor="middle" font-size="11" fill="#495057">Concurrent</text>
+    <text x="330" y="460" text-anchor="middle" font-size="11" fill="#495057">Write (8 thr)</text>
+
+    <!-- Category 3: Point Query -->
+    <rect x="460" y="200" width="160" height="220" rx="3" fill="#339af0"/>
+    <text x="540" y="192" text-anchor="middle" font-size="11" font-weight="bold" fill="#339af0">6.0M</text>
+    <rect x="460" y="395" width="160" height="25" rx="3" fill="#adb5bd"/>
+    <text x="540" y="388" text-anchor="middle" font-size="11" font-weight="bold" fill="#868e96">549K</text>
+    <text x="540" y="445" text-anchor="middle" font-size="11" fill="#495057">Point</text>
+    <text x="540" y="460" text-anchor="middle" font-size="11" fill="#495057">Query</text>
+
+    <!-- Category 4: Prefix Scan -->
+    <rect x="670" y="350" width="160" height="70" rx="3" fill="#339af0"/>
+    <text x="750" y="342" text-anchor="middle" font-size="11" font-weight="bold" fill="#339af0">72K</text>
+    <rect x="670" y="395" width="160" height="25" rx="3" fill="#adb5bd"/>
+    <text x="750" y="388" text-anchor="middle" font-size="11" font-weight="bold" fill="#868e96">11K</text>
+    <text x="750" y="445" text-anchor="middle" font-size="11" fill="#495057">Prefix Scan</text>
+    <text x="750" y="460" text-anchor="middle" font-size="11" fill="#495057">(~200 recs)</text>
+
+    <!-- Legend -->
+    <rect x="40" y="490" width="20" height="15" fill="#339af0"/>
+    <text x="70" y="503" font-size="12" fill="#495057">FlowDB</text>
+    <rect x="170" y="490" width="20" height="15" fill="#adb5bd"/>
+    <text x="200" y="503" font-size="12" fill="#495057">RocksDB</text>
+  </g>
+
+  <!-- JsonDB Benchmarks -->
+  <rect x="50" y="540" width="900" height="145" rx="8" fill="white" stroke="#dee2e6"/>
+  <text x="500" y="565" text-anchor="middle" font-size="14" font-weight="bold" fill="#212529">JsonDB Document Layer Benchmarks (release, Apple M-series, SyncMode::Always)</text>
+
+  <g transform="translate(80, 580)">
+    <text x="0" y="15" font-size="11" font-weight="bold" fill="#339af0">Sequential write</text>
+    <text x="0" y="33" font-size="10" fill="#868e96">~121 docs/s (fsync bottleneck)</text>
+    <rect x="0" y="40" width="120" height="12" rx="2" fill="#339af0" opacity="0.5"/>
+
+    <text x="200" y="15" font-size="11" font-weight="bold" fill="#e67700">Batch write (100/batch)</text>
+    <text x="200" y="33" font-size="10" fill="#868e96">~7,057 docs/s</text>
+    <rect x="200" y="40" width="140" height="12" rx="2" fill="#e67700"/>
+
+    <text x="420" y="15" font-size="11" font-weight="bold" fill="#2b8a3e">Point read</text>
+    <text x="420" y="33" font-size="10" fill="#868e96">~156,075 ops/s</text>
+    <rect x="420" y="40" width="150" height="12" rx="2" fill="#2b8a3e"/>
+
+    <text x="620" y="15" font-size="11" font-weight="bold" fill="#d6336c">Index lookup</text>
+    <text x="620" y="33" font-size="10" fill="#868e96">~7,463 queries/s</text>
+    <rect x="620" y="40" width="130" height="12" rx="2" fill="#d6336c"/>
+
+    <text x="800" y="15" font-size="11" font-weight="bold" fill="#7950f2">Auto-increment</text>
+    <text x="800" y="33" font-size="10" fill="#868e96">~53 ops/s</text>
+    <rect x="800" y="40" width="90" height="12" rx="2" fill="#7950f2"/>
+  </g>
+
+  <text x="500" y="678" text-anchor="middle" font-size="11" fill="#868e96">Note: Write throughput is bottlenecked by WAL fsync. Use batch writes (transaction) or SyncMode::IntervalMs for higher throughput.</text>
+</svg>

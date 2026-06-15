@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420" font-family="'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f8f9fa"/><stop offset="100%" stop-color="#e9ecef"/></linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#bg)" rx="10"/>
+
+  <text x="450" y="30" text-anchor="middle" font-size="16" font-weight="bold" fill="#212529">ACID Transaction (OCC + MVCC)</text>
+
+  <!-- Steps -->
+  <rect x="30" y="50" width="180" height="35" rx="17" fill="#339af0"/>
+  <text x="120" y="73" text-anchor="middle" font-size="11" font-weight="bold" fill="white">BEGIN</text>
+  <text x="220" y="73" font-size="10" fill="#495057">snapshot_seq = seq_counter.load()</text>
+
+  <line x1="120" y1="85" x2="120" y2="100" stroke="#495057" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <rect x="30" y="105" width="180" height="45" rx="8" fill="white" stroke="#e67700"/>
+  <text x="120" y="125" text-anchor="middle" font-size="11" font-weight="bold" fill="#e67700">READ / WRITE</text>
+  <text x="120" y="142" text-anchor="middle" font-size="9" fill="#868e96">Buffer writes locally</text>
+
+  <line x1="120" y1="150" x2="120" y2="165" stroke="#495057" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <rect x="30" y="170" width="180" height="35" rx="17" fill="#d6336c"/>
+  <text x="120" y="193" text-anchor="middle" font-size="11" font-weight="bold" fill="white">COMMIT</text>
+
+  <line x1="120" y1="205" x2="120" y2="220" stroke="#495057" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <rect x="30" y="225" width="180" height="40" rx="6" fill="#fff3bf" stroke="#ffd43b"/>
+  <text x="120" y="245" text-anchor="middle" font-size="10" font-weight="bold" fill="#e67700">Validate Uniqueness</text>
+  <text x="120" y="258" text-anchor="middle" font-size="9" fill="#868e96">engine + write buffer</text>
+
+  <line x1="120" y1="265" x2="120" y2="278" stroke="#495057" stroke-width="1" marker-end="url(#a)"/>
+
+  <rect x="30" y="283" width="180" height="40" rx="6" fill="#d3f9d8" stroke="#51cf66"/>
+  <text x="120" y="303" text-anchor="middle" font-size="10" font-weight="bold" fill="#2b8a3e">Atomic Batch Write</text>
+  <text x="120" y="316" text-anchor="middle" font-size="9" fill="#868e96">write_internal → WAL + Mem</text>
+
+  <line x1="120" y1="323" x2="120" y2="336" stroke="#495057" stroke-width="1" marker-end="url(#a)"/>
+
+  <rect x="30" y="341" width="180" height="35" rx="6" fill="#d3f9d8" stroke="#51cf66"/>
+  <text x="120" y="363" text-anchor="middle" font-size="10" font-weight="bold" fill="#2b8a3e">Mark committed = true</text>
+
+  <!-- Notes -->
+  <rect x="250" y="50" width="620" height="140" rx="6" fill="white" stroke="#adb5bd"/>
+  <text x="560" y="72" text-anchor="middle" font-size="12" font-weight="bold" fill="#212529">What's in the batch?</text>
+  <text x="270" y="95" font-size="11" fill="#495057">1. Counter record (auto-increment)</text>
+  <text x="270" y="115" font-size="11" fill="#495057">2. Delete old index entries</text>
+  <text x="270" y="135" font-size="11" fill="#495057">3. Write new document</text>
+  <text x="270" y="155" font-size="11" fill="#495057">4. Write new index entries</text>
+  <text x="270" y="175" font-size="11" fill="#495057">5. All in one write_internal => atomic</text>
+
+  <rect x="250" y="210" width="300" height="90" rx="6" fill="#fff5f5" stroke="#ffc9c9"/>
+  <text x="400" y="232" text-anchor="middle" font-size="11" font-weight="bold" fill="#c92a2a">Crash Safety</text>
+  <text x="270" y="252" font-size="10" fill="#495057">• WAL fsync before returning</text>
+  <text x="270" y="270" font-size="10" fill="#495057">• Checksums on every record</text>
+  <text x="270" y="288" font-size="10" fill="#495057">• Replay on open, truncate corruption</text>
+
+  <rect x="570" y="210" width="300" height="90" rx="6" fill="#ebfbee" stroke="#b2f2bb"/>
+  <text x="720" y="232" text-anchor="middle" font-size="11" font-weight="bold" fill="#2b8a3e">Concurrency</text>
+  <text x="590" y="252" font-size="10" fill="#495057">• write_lock: serializes RMW</text>
+  <text x="590" y="270" font-size="10" fill="#495057">• Snapshots via seq_counter</text>
+  <text x="590" y="288" font-size="10" fill="#495057">• MVCC: seq filters stale records</text>
+
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10" fill="#495057"/></marker>
+  </defs>
+</svg>

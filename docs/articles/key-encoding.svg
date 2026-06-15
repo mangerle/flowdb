@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 500" font-family="'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f8f9fa"/><stop offset="100%" stop-color="#e9ecef"/></linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#bg)" rx="10"/>
+
+  <text x="450" y="30" text-anchor="middle" font-size="16" font-weight="bold" fill="#212529">Key Encoding Scheme</text>
+
+  <!-- Doc Key -->
+  <text x="30" y="55" font-size="12" font-weight="bold" fill="#339af0">Doc Key</text>
+  <rect x="30" y="65" width="840" height="35" rx="4" fill="white" stroke="#339af0"/>
+  <rect x="38" y="70" width="30" height="25" rx="3" fill="#339af0"/>
+  <text x="53" y="87" text-anchor="middle" font-size="10" font-weight="bold" fill="white">D</text>
+  <text x="78" y="87" font-size="12" fill="#212529">store</text>
+  <rect x="240" y="70" width="30" height="25" rx="3" fill="#adb5bd"/>
+  <text x="255" y="87" text-anchor="middle" font-size="9" fill="white">SEP</text>
+  <text x="280" y="87" font-size="12" fill="#212529">primary_key</text>
+
+  <!-- Index Key -->
+  <text x="30" y="120" font-size="12" font-weight="bold" fill="#e67700">Index Key</text>
+  <rect x="30" y="130" width="840" height="35" rx="4" fill="white" stroke="#e67700"/>
+  <rect x="38" y="135" width="30" height="25" rx="3" fill="#e67700"/>
+  <text x="53" y="152" text-anchor="middle" font-size="10" font-weight="bold" fill="white">I</text>
+  <text x="78" y="152" font-size="12" fill="#212529">store</text>
+  <rect x="200" y="135" width="30" height="25" rx="3" fill="#adb5bd"/>
+  <text x="215" y="152" text-anchor="middle" font-size="9" fill="white">SEP</text>
+  <text x="240" y="152" font-size="12" fill="#212529">index</text>
+  <rect x="370" y="135" width="30" height="25" rx="3" fill="#adb5bd"/>
+  <text x="385" y="152" text-anchor="middle" font-size="9" fill="white">SEP</text>
+  <text x="410" y="152" font-size="12" fill="#212529">encoded_value</text>
+  <rect x="590" y="135" width="30" height="25" rx="3" fill="#adb5bd"/>
+  <text x="605" y="152" text-anchor="middle" font-size="9" fill="white">SEP</text>
+  <text x="630" y="152" font-size="12" fill="#212529">pk</text>
+
+  <!-- Composite -->
+  <text x="30" y="190" font-size="12" font-weight="bold" fill="#7950f2">Composite Index</text>
+  <rect x="30" y="200" width="840" height="35" rx="4" fill="white" stroke="#7950f2"/>
+  <rect x="38" y="205" width="30" height="25" rx="3" fill="#7950f2"/>
+  <text x="53" y="222" text-anchor="middle" font-size="10" font-weight="bold" fill="white">I</text>
+  <text x="78" y="222" font-size="12" fill="#212529">store</text>
+  <rect x="200" y="205" width="25" height="25" rx="3" fill="#adb5bd"/>
+  <text x="212" y="222" text-anchor="middle" font-size="9" fill="white">SEP</text>
+  <text x="235" y="222" font-size="12" fill="#212529">index</text>
+  <rect x="370" y="205" width="25" height="25" rx="3" fill="#adb5bd"/>
+  <text x="382" y="222" text-anchor="middle" font-size="9" fill="white">SEP</text>
+  <text x="405" y="222" font-size="12" fill="#212529">enc(city)</text>
+  <rect x="520" y="205" width="25" height="25" rx="3" fill="#adb5bd"/>
+  <text x="532" y="222" text-anchor="middle" font-size="9" fill="white">SEP</text>
+  <text x="555" y="222" font-size="12" fill="#212529">enc(age)</text>
+  <rect x="680" y="205" width="25" height="25" rx="3" fill="#adb5bd"/>
+  <text x="692" y="222" text-anchor="middle" font-size="9" fill="white">SEP</text>
+  <text x="715" y="222" font-size="12" fill="#212529">pk</text>
+
+  <!-- Encoding table -->
+  <rect x="30" y="255" width="840" height="130" rx="6" fill="white" stroke="#adb5bd"/>
+  <text x="450" y="278" text-anchor="middle" font-size="12" font-weight="bold" fill="#212529">Sortable Value Encoding</text>
+  <text x="450" y="295" text-anchor="middle" font-size="10" fill="#868e96">Order: null &lt; false &lt; true &lt; number &lt; string &lt; array</text>
+
+  <g transform="translate(50, 305)">
+    <text x="0" y="15" font-size="11" fill="#495057">null → 0x01</text>
+    <text x="0" y="35" font-size="11" fill="#495057">bool → 0x02|0x03</text>
+    <text x="200" y="15" font-size="11" fill="#495057">i64 → 0x04 + big-endian ^ sign</text>
+    <text x="200" y="35" font-size="11" fill="#495057">u64 → 0x05 + big-endian</text>
+    <text x="470" y="15" font-size="11" fill="#495057">f64 → 0x06 + adjusted IEEE 754</text>
+    <text x="470" y="35" font-size="11" fill="#495057">string → 0x07 + UTF-8</text>
+    <text x="680" y="15" font-size="11" fill="#495057">array → 0x08 + JSON</text>
+  </g>
+
+  <!-- Example -->
+  <rect x="30" y="400" width="840" height="85" rx="6" fill="#fff3bf" stroke="#fab005"/>
+  <text x="450" y="422" text-anchor="middle" font-size="11" font-weight="bold" fill="#e67700">Composite Range Query Example</text>
+  <text x="40" y="442" font-size="11" fill="#495057">Index: (city, age)  |  Query: where_eq("city","NYC") + where_range("age",25,35)</text>
+  <text x="40" y="460" font-size="10" fill="#868e96">Scan: [Iusersby_city_age█[7]NYC█[4]25 , Iusersby_city_age█[7]NYC█[4]35)</text>
+  <text x="40" y="478" font-size="11" fill="#d6336c" font-weight="bold">→ Single byte range scan, O(log n) per block, no full table scan</text>
+</svg>

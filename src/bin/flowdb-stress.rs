@@ -475,7 +475,7 @@ mod tests {
         assert_eq!(cfg.memtable_size_mb, 4);
         assert_eq!(cfg.block_size, 4096);
         assert_eq!(cfg.max_frozen_memtables, 4);
-        assert_eq!(cfg.create_if_missing, true);
+        assert!(cfg.create_if_missing);
         assert_eq!(cfg.wal_sync_mode, SyncMode::Always);
         assert!(!cfg.auto_background);
         cleanup_temp_dir(&dir);
