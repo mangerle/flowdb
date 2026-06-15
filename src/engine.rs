@@ -11,7 +11,7 @@ use crate::record::{
 use crate::sstable::SstReader;
 use crate::stats::{EngineStats, StatsCounters};
 use crate::wal::Wal;
-use crate::write_worker::WriteWorker;
+use crate::write_worker::{Completion, Submission, WritePipeline, WriteWorker};
 use parking_lot::RwLock;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
@@ -37,7 +37,7 @@ impl Drop for MaintenanceHandle {
 
 pub struct Engine {
     config: Config,
-    worker: Arc<parking_lot::Mutex<WriteWorker>>,
+    worker: Arc<WritePipeline>,
     seq_counter: std::sync::atomic::AtomicU64,
     stats: Arc<StatsCounters>,
     memtables: Arc<MemTables>,
@@ -107,7 +107,7 @@ impl Engine {
                     let now = std::time::Instant::now();
 
                     if now.duration_since(last_flush) >= flush_dur {
-                        if let Err(e) = worker.lock().do_flush() {
+                        if let Err(e) = worker.worker.lock().do_flush() {
                             tracing::error!("Background flush failed: {}", e);
                         }
                         last_flush = std::time::Instant::now();
@@ -167,7 +167,7 @@ impl Engine {
                     }
 
                     if now.duration_since(last_sync) >= wal_sync_dur {
-                        let mut wr = worker.lock();
+                        let mut wr = worker.worker.lock();
                         if let Err(e) = wr.wal.sync_all() {
                             tracing::error!("WAL sync failed: {}", e);
                         }
@@ -310,7 +310,7 @@ impl Engine {
 
         let auto_bg = config.auto_background;
 
-        let worker = Arc::new(parking_lot::Mutex::new(WriteWorker::new(
+        let worker = Arc::new(WritePipeline::new(WriteWorker::new(
             config.clone(),
             wal,
             memtables.clone(),
@@ -426,14 +426,18 @@ impl Engine {
         let (wal_buf, mem_bytes) = crate::wal::encode_batch(&records);
         let sync_mode = self.config.wal_sync_mode;
         let start = std::time::Instant::now();
-        self.worker.lock().process_batch_encoded(
+
+        let sub = Submission {
             records,
-            &wal_buf,
+            wal_buf,
             mem_bytes,
             num_records,
             batch_max_seq,
             sync_mode,
-        )?;
+            completion: Arc::new(Completion::new()),
+        };
+        self.worker.submit(sub)?;
+
         self.stats
             .record_write_latency(start.elapsed().as_micros() as u64);
         Ok(())
@@ -762,7 +766,7 @@ impl Engine {
     }
 
     pub fn flush(&self) -> Result<()> {
-        self.worker.lock().do_flush()
+        self.worker.worker.lock().do_flush()
     }
 
     pub fn trigger_gc(&self) -> Result<u64> {
@@ -801,7 +805,7 @@ impl Engine {
         // Stop the background maintenance thread first to avoid
         // concurrent flush/compact/gc during shutdown.
         self.maintenance.take();
-        let mut worker = self.worker.lock();
+        let mut worker = self.worker.worker.lock();
         worker.do_flush()?;
         worker.flush_wal()?;
         Ok(())
@@ -815,7 +819,7 @@ impl Engine {
     /// [`MaintenanceHandle`] first, or simply let `Engine::shutdown`
     /// consume it.
     pub fn close(&self) -> Result<()> {
-        let mut w = self.worker.lock();
+        let mut w = self.worker.worker.lock();
         w.do_flush()?;
         w.flush_wal()
     }

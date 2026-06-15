@@ -1,12 +1,16 @@
 use crate::block_meta_index::BlockMetaIndex;
-use crate::error::Result;
+use crate::error::{FlowError, Result};
 use crate::manifest::{Manifest, ManifestEntry, SstInfo};
 use crate::memtable::MemTables;
 use crate::record::{Config, InternalRecord, SyncMode};
 use crate::sstable::SstWriter;
 use crate::stats::StatsCounters;
 use crate::wal::Wal;
+use parking_lot::{Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+// ── WriteWorker (the actual WAL + memtable + flush logic) ────────────
 
 pub(crate) struct WriteWorker {
     config: Config,
@@ -40,6 +44,36 @@ impl WriteWorker {
         self.wal.flush()
     }
 
+    /// Core write: WAL + memtable insert (no fsync). Used by both
+    /// `process_batch_encoded` (single) and `process_batch_group` (batched).
+    fn process_batch_inner(
+        &mut self,
+        records: Vec<InternalRecord>,
+        wal_buf: &[u8],
+        mem_bytes: u64,
+        num_records: u64,
+        batch_max_seq: u64,
+    ) -> Result<()> {
+        self.wal.write_encoded(wal_buf, batch_max_seq)?;
+
+        {
+            let mut active = self.memtables.active_for_batch();
+            for rec in records {
+                active.insert(rec);
+            }
+        }
+
+        self.stats.add_wal_bytes(mem_bytes);
+        self.stats.records_written(num_records, mem_bytes);
+        Ok(())
+    }
+
+    fn update_stats(&mut self) {
+        let (rec_count, byte_count) = self.memtables.active_stats();
+        self.stats.set_memtable(rec_count, byte_count);
+        self.stats.set_frozen_count(self.memtables.frozen_count());
+    }
+
     pub fn process_batch_encoded(
         &mut self,
         records: Vec<InternalRecord>,
@@ -50,22 +84,12 @@ impl WriteWorker {
         sync_mode: SyncMode,
     ) -> Result<()> {
         // Backpressure: if frozen memtables have piled up beyond the limit,
-        // flush them before accepting new writes. This prevents unbounded
-        // memory growth when the flush rate can't keep up with writes.
+        // flush them before accepting new writes.
         while self.memtables.frozen_backpressure() {
             self.do_flush()?;
         }
 
-        let bytes_written = mem_bytes;
-
-        self.wal.write_encoded(wal_buf, batch_max_seq)?;
-
-        {
-            let mut active = self.memtables.active_for_batch();
-            for rec in records {
-                active.insert(rec);
-            }
-        }
+        self.process_batch_inner(records, wal_buf, mem_bytes, num_records, batch_max_seq)?;
 
         // Durability: if the caller requested synchronous durability,
         // fsync the WAL immediately so this batch survives a crash.
@@ -73,11 +97,38 @@ impl WriteWorker {
             self.wal.sync_all()?;
         }
 
-        self.stats.add_wal_bytes(bytes_written);
-        let (rec_count, byte_count) = self.memtables.active_stats();
-        self.stats.set_memtable(rec_count, byte_count);
-        self.stats.set_frozen_count(self.memtables.frozen_count());
-        self.stats.records_written(num_records, bytes_written);
+        self.update_stats();
+
+        if self.memtables.should_flush() {
+            self.do_flush()?;
+        }
+
+        Ok(())
+    }
+
+    /// Process multiple submissions together with a single WAL fsync.
+    pub fn process_batch_group(&mut self, submissions: &[Arc<Submission>]) -> Result<()> {
+        while self.memtables.frozen_backpressure() {
+            self.do_flush()?;
+        }
+
+        // WAL write for each batch (buffered I/O, no fsync yet).
+        for sub in submissions {
+            self.process_batch_inner(
+                sub.records.clone(),
+                &sub.wal_buf,
+                sub.mem_bytes,
+                sub.num_records,
+                sub.batch_max_seq,
+            )?;
+        }
+
+        // Single fsync if ANY batch requires synchronous durability.
+        if submissions.iter().any(|s| s.sync_mode == SyncMode::Always) {
+            self.wal.sync_all()?;
+        }
+
+        self.update_stats();
 
         if self.memtables.should_flush() {
             self.do_flush()?;
@@ -89,11 +140,6 @@ impl WriteWorker {
     pub fn do_flush(&mut self) -> Result<()> {
         let _did_freeze = self.memtables.freeze();
 
-        // Pop the oldest frozen memtable and flush it to SST.
-        // When freeze() succeeds the active was just moved to frozen, so
-        // we flush the oldest entry.  When freeze() fails (active empty)
-        // we still pop one — this relieves backpressure and prevents a
-        // livelock when frozen_backpressure is true with an empty active.
         let frozen = self.memtables.pop_frozen();
 
         let frozen = match frozen {
@@ -105,7 +151,6 @@ impl WriteWorker {
         let mut all_records: Vec<InternalRecord> = frozen.iter_sorted().cloned().collect();
         let now_us = now_micros();
         all_records.retain(|r| r.expire_at > now_us);
-        // Records are already sorted by (key, ts, seq) from freeze().
 
         if all_records.is_empty() {
             self.stats.set_frozen_count(self.memtables.frozen_count());
@@ -134,10 +179,6 @@ impl WriteWorker {
 
         std::fs::rename(&tmp_path, &sst_path)?;
 
-        // Make the rename durable by fsyncing the SST directory.
-        // SstWriter::write already called sync_all on the file content,
-        // but the directory entry (the rename) is not durable until the
-        // parent directory's metadata is synced.
         let sst_dir_file = std::fs::File::open(&sst_dir)?;
         sst_dir_file.sync_all()?;
 
@@ -212,6 +253,127 @@ impl WriteWorker {
         Ok(())
     }
 }
+
+// ── Submission (a single batch queued for group commit) ──────────────
+
+pub(crate) struct Submission {
+    pub records: Vec<InternalRecord>,
+    pub wal_buf: Vec<u8>,
+    pub mem_bytes: u64,
+    pub num_records: u64,
+    pub batch_max_seq: u64,
+    pub sync_mode: SyncMode,
+    pub completion: Arc<Completion>,
+}
+
+pub(crate) struct Completion {
+    done: Mutex<bool>,
+    error_msg: Mutex<Option<String>>,
+    cv: Condvar,
+}
+
+impl Completion {
+    pub fn new() -> Self {
+        Self {
+            done: Mutex::new(false),
+            error_msg: Mutex::new(None),
+            cv: Condvar::new(),
+        }
+    }
+}
+
+// ── WritePipeline — group commit orchestrator ────────────────────────
+
+/// Wraps a [`WriteWorker`] with a group-commit queue.  Multiple
+/// concurrent callers enqueue their batches; the first caller to arrive
+/// drains the queue, processes all pending batches under a single
+/// lock acquisition, and performs one WAL fsync for the group.
+pub(crate) struct WritePipeline {
+    /// The underlying write worker.
+    pub worker: Mutex<WriteWorker>,
+    /// Pending submissions not yet drained by the committer.
+    queue: Mutex<Vec<Arc<Submission>>>,
+    /// Set while a thread is draining the queue.
+    committing: AtomicBool,
+}
+
+impl WritePipeline {
+    pub fn new(worker: WriteWorker) -> Self {
+        Self {
+            worker: Mutex::new(worker),
+            queue: Mutex::new(Vec::new()),
+            committing: AtomicBool::new(false),
+        }
+    }
+
+    /// Enqueue a write and wait for it to be committed.  If no other
+    /// thread is currently committing, this thread becomes the commit
+    /// leader and drains the entire queue.
+    pub fn submit(&self, sub: Submission) -> Result<()> {
+        let sub = Arc::new(sub);
+        let completion = sub.completion.clone();
+
+        // 1. Enqueue under the queue lock.
+        {
+            let mut q = self.queue.lock();
+            q.push(sub);
+        }
+        // 2. Attempt to become the commit leader.
+        if self
+            .committing
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            // We are the leader — drain and process.
+            let _ = self.drain_and_process();
+            // Release so the next leader can take over.
+            self.committing.store(false, Ordering::Release);
+            // If the leader's own batch was part of the group, the result
+            // was already signalled; the wait below is a no-op.
+        }
+        // 3. Wait for our completion to be signalled.
+        Self::wait_for_completion(&completion)
+    }
+
+    fn drain_and_process(&self) -> Result<()> {
+        loop {
+            let pending: Vec<Arc<Submission>> = {
+                let mut q = self.queue.lock();
+                if q.is_empty() {
+                    break;
+                }
+                std::mem::take(&mut *q)
+            };
+
+            let result = {
+                let mut w = self.worker.lock();
+                w.process_batch_group(&pending)
+            };
+
+            let err_msg = result.as_ref().err().map(|e| e.to_string());
+            for sub in &pending {
+                let mut done = sub.completion.done.lock();
+                *sub.completion.error_msg.lock() = err_msg.clone();
+                *done = true;
+                sub.completion.cv.notify_all();
+            }
+        }
+        Ok(())
+    }
+
+    fn wait_for_completion(c: &Completion) -> Result<()> {
+        let mut done = c.done.lock();
+        while !*done {
+            c.cv.wait(&mut done);
+        }
+        match c.error_msg.lock().take() {
+            Some(msg) => Err(FlowError::Other(msg)),
+            None => Ok(()),
+        }
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
 
 fn now_micros() -> i64 {
     std::time::SystemTime::now()
