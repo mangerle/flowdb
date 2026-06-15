@@ -255,6 +255,24 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+// ── composite value encoding (multi-field index keys) ─────────────
+//
+// Fields are joined with SEP (0x00) so the encoded bytes sort correctly:
+// encode(field1) < SEP < encode(field2) ...  preserves field-by-field ordering.
+
+/// Encode a slice of JSON values into a single sortable byte sequence
+/// for use in composite (multi-field) index keys.
+pub(crate) fn encode_composite_value(values: &[Value]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(values.len() * 16);
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            buf.push(SEP);
+        }
+        buf.extend_from_slice(&encode_index_value(v));
+    }
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

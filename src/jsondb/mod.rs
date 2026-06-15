@@ -9,8 +9,9 @@ mod schema;
 use crate::engine::Engine;
 use crate::error::{FlowError, Result};
 use crate::jsondb::encoding::{
-    counter_key, decode_doc, doc_key, doc_prefix, encode_doc, encode_index_value,
-    encode_primary_key, extract_field, idx_key, idx_prefix, idx_value_prefix, prefix_range,
+    counter_key, decode_doc, doc_key, doc_prefix, encode_composite_value, encode_doc,
+    encode_index_value, encode_primary_key, extract_field, idx_key, idx_prefix, idx_value_prefix,
+    prefix_range, SEP,
 };
 use crate::jsondb::schema::{
     load_schemas, schema_delete_record, schema_record, validate_index_def, validate_store_def,
@@ -51,7 +52,7 @@ pub enum TransactionMode {
 ///
 /// let db = JsonDB::open(Default::default()).unwrap();
 /// db.create_object_store("users", "id").unwrap();
-/// db.create_index("users", "by_email", "email", true).unwrap();
+/// db.create_index("users", "by_email", &["email"], true).unwrap();
 ///
 /// db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
 /// let doc = db.get("users", &json!("u1")).unwrap();
@@ -187,27 +188,32 @@ impl JsonDB {
     }
 
     /// Create a secondary index on an existing object store.
+    ///
+    /// `key_paths` can be one or more field paths (e.g. `&["email"]` for a
+    /// single-field index or `&["city", "age"]` for a composite index).
+    /// Composite indexes enable efficient multi-field queries via
+    /// [`QueryBuilder`].
     pub fn create_index(
         &self,
         store: &str,
         name: &str,
-        key_path: &str,
+        key_paths: &[&str],
         unique: bool,
     ) -> Result<()> {
         let mut def = self
             .schema
             .get(store)
             .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", store)))?;
-        validate_index_def(&def, name, key_path)?;
+        validate_index_def(&def, name, key_paths)?;
 
         let index = IndexDef {
             name: name.to_string(),
-            key_path: key_path.to_string(),
+            key_paths: key_paths.iter().map(|s| s.to_string()).collect(),
             unique,
             multi_entry: false,
         };
 
-        def.indexes.push(index);
+        def.indexes.push(index.clone());
         self.engine
             .write_internal(vec![InternalRecord::from_record(
                 &schema_record(&def)?,
@@ -220,12 +226,12 @@ impl JsonDB {
         let mut records = Vec::new();
         for rec in docs {
             let doc = decode_doc(&rec?.value)?;
-            if let Some(val) = extract_field(&doc, key_path) {
+            let index_vals = extract_index_values(&doc, &index);
+            for vals in index_vals {
                 let key_bytes = encode_primary_key(
-                    &extract_field(&doc, &def.key_path)
-                        .unwrap_or(Value::Null),
+                    &extract_field(&doc, &def.key_path).unwrap_or(Value::Null),
                 )?;
-                let encoded = encode_index_value(&val);
+                let encoded = encode_composite_value(&vals);
                 records.push(InternalRecord::from_record(
                     &Record::new(
                         idx_key(store, name, &encoded, &key_bytes),
@@ -242,6 +248,12 @@ impl JsonDB {
 
         self.schema.insert(def);
         Ok(())
+    }
+
+    /// Convenience: create a single-field index.  Equivalent to
+    /// `create_index(store, name, &[key_path], unique)`.
+    pub fn create_index_on(&self, store: &str, name: &str, key_path: &str, unique: bool) -> Result<()> {
+        self.create_index(store, name, &[key_path], unique)
     }
 
     /// Delete a secondary index (removes all index entries).
@@ -407,13 +419,26 @@ impl JsonDB {
             .schema
             .get(store)
             .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", store)))?;
-        let _idx_def = _def
+        let idx_def = _def
             .indexes
             .iter()
             .find(|i| i.name == index)
-            .ok_or_else(|| FlowError::JsonDb(format!("index '{}' not found on '{}'", index, store)))?;
+            .ok_or_else(|| {
+                FlowError::JsonDb(format!("index '{}' not found on '{}'", index, store))
+            })?;
+        let is_composite = idx_def.key_paths.len() > 1;
 
-        let encoded = encode_index_value(value);
+        let encoded = if is_composite {
+            // Multi-field index: accept array ["v1","v2"] for full match,
+            // or single value for prefix scan on first field.
+            match value {
+                Value::Array(arr) => encode_composite_value(arr),
+                _ => encode_index_value(value),
+            }
+        } else {
+            encode_index_value(value)
+        };
+
         let pfx = idx_value_prefix(store, index, &encoded);
         let iter = self.engine.scan(prefix_range(&pfx))?;
         let mut docs = Vec::new();
@@ -440,20 +465,35 @@ impl JsonDB {
             .schema
             .get(store)
             .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", store)))?;
-        let _idx_def = _def
+        let idx_def = _def
             .indexes
             .iter()
             .find(|i| i.name == index)
-            .ok_or_else(|| FlowError::JsonDb(format!("index '{}' not found on '{}'", index, store)))?;
+            .ok_or_else(|| {
+                FlowError::JsonDb(format!("index '{}' not found on '{}'", index, store))
+            })?;
+        let is_composite = idx_def.key_paths.len() > 1;
+
+        let enc_start = if is_composite {
+            match start {
+                Value::Array(arr) => encode_composite_value(arr),
+                _ => encode_index_value(start),
+            }
+        } else {
+            encode_index_value(start)
+        };
+        let enc_end = if is_composite {
+            match end {
+                Value::Array(arr) => encode_composite_value(arr),
+                _ => encode_index_value(end),
+            }
+        } else {
+            encode_index_value(end)
+        };
 
         let pfx = idx_prefix(store, index);
-        let enc_start = encode_index_value(start);
-        let enc_end = encode_index_value(end);
-
         let range = ScanRange {
-            key_start: Bound::Included(
-                [pfx.as_slice(), &enc_start].concat(),
-            ),
+            key_start: Bound::Included([pfx.as_slice(), &enc_start].concat()),
             key_end: Bound::Excluded([pfx.as_slice(), &enc_end].concat()),
             ts_start: Bound::Unbounded,
             ts_end: Bound::Unbounded,
@@ -496,6 +536,11 @@ impl JsonDB {
             writes: HashMap::new(),
             committed: false,
         })
+    }
+
+    /// Create a [`QueryBuilder`] for the given store.
+    pub fn query<'a>(&'a self, store: &'a str) -> QueryBuilder<'a> {
+        QueryBuilder::new(self, store)
     }
 }
 
@@ -681,12 +726,14 @@ impl<'db> Transaction<'db> {
         let mut docs = Vec::new();
 
         // Find the index key_path for field checking.
-        let idx_key_path = def
+        let idx_key_paths = def
             .indexes
             .iter()
             .find(|i| i.name == index)
-            .map(|i| i.key_path.as_str())
-            .unwrap_or("");
+            .map(|i| i.key_paths.clone())
+            .unwrap_or_default();
+        // For composite indexes, use the first key_path for basic write buffer matching.
+        let first_path = idx_key_paths.first().map(|s| s.as_str()).unwrap_or("");
 
         for r in iter {
             let rec = r?;
@@ -697,7 +744,7 @@ impl<'db> Transaction<'db> {
                     Some(bytes) => {
                         let buffered_doc = decode_doc(bytes)?;
                         // Only include if the buffered doc still matches the query value.
-                        if extract_field(&buffered_doc, idx_key_path) == Some(value.clone()) {
+                        if extract_field(&buffered_doc, first_path) == Some(value.clone()) {
                             docs.push(buffered_doc);
                         }
                     }
@@ -715,7 +762,7 @@ impl<'db> Transaction<'db> {
             }
             if let Some(bytes) = doc_opt {
                 let doc: Value = decode_doc(bytes)?;
-                if extract_field(&doc, idx_key_path) == Some(value.clone()) {
+                if extract_field(&doc, first_path) == Some(value.clone()) {
                     // Avoid duplicates that were already returned from the engine scan.
                     let already = docs.iter().any(|d| extract_field(d, &def.key_path) == extract_field(&doc, &def.key_path));
                     if !already {
@@ -736,15 +783,17 @@ impl<'db> Transaction<'db> {
         end: &Value,
     ) -> Result<Vec<Value>> {
         let store_def = self.require_store(store)?;
-        let idx_key_path_str = store_def
+        let first_path = store_def
             .indexes
             .iter()
             .find(|i| i.name == index)
             .ok_or_else(|| {
                 FlowError::JsonDb(format!("index '{}' not found on '{}'", index, store))
             })?
-            .key_path
-            .clone();
+            .key_paths
+            .first()
+            .cloned()
+            .unwrap_or_default();
 
         let pfx = idx_prefix(store, index);
         let enc_start = encode_index_value(start);
@@ -767,7 +816,7 @@ impl<'db> Transaction<'db> {
                 match doc_opt {
                     Some(bytes) => {
                         let buffered_doc = decode_doc(bytes)?;
-                        if let Some(index_val) = extract_field(&buffered_doc, &idx_key_path_str) {
+                        if let Some(index_val) = extract_field(&buffered_doc, &first_path) {
                             let enc = encode_index_value(&index_val);
                             if enc.as_slice() >= enc_start.as_slice()
                                 && enc.as_slice() < enc_end.as_slice()
@@ -798,7 +847,7 @@ impl<'db> Transaction<'db> {
                     continue;
                 }
                 let buffered_doc = decode_doc(bytes)?;
-                        if let Some(index_val) = extract_field(&buffered_doc, &idx_key_path_str) {
+                if let Some(index_val) = extract_field(&buffered_doc, &first_path) {
                     let enc = encode_index_value(&index_val);
                     if enc.as_slice() >= enc_start.as_slice()
                         && enc.as_slice() < enc_end.as_slice()
@@ -867,8 +916,8 @@ impl<'db> Transaction<'db> {
             if let Some(ref old_doc_val) = old_doc {
                 for idx in &def.indexes {
                     let old_values = extract_index_values(old_doc_val, idx);
-                    for old_val in old_values {
-                        let encoded = encode_index_value(&old_val);
+                    for vals in old_values {
+                        let encoded = encode_composite_value(&vals);
                         records.push(InternalRecord::delete(
                             idx_key(store_name, &idx.name, &encoded, key_bytes),
                             0,
@@ -893,8 +942,8 @@ impl<'db> Transaction<'db> {
 
                         // Unique validation.
                         if idx.unique {
-                            for new_val in &new_values {
-                                let encoded = encode_index_value(new_val);
+                            for vals in &new_values {
+                                let encoded = encode_composite_value(vals);
                                 // Check if this index value is already taken.
                                 let val_pfx = idx_value_prefix(store_name, &idx.name, &encoded);
                                 let iter = self.db.engine.scan(prefix_range(&val_pfx))?;
@@ -902,16 +951,16 @@ impl<'db> Transaction<'db> {
                                     let rec = r?;
                                     if rec.value.as_slice() != key_bytes.as_slice() {
                                         return Err(FlowError::JsonDb(format!(
-                                            "unique constraint violation: index '{}' value '{}' already exists",
-                                            idx.name, new_val
+                                            "unique constraint violation: index '{}' value '{:?}' already exists",
+                                            idx.name, vals
                                         )));
                                     }
                                 }
                             }
                         }
 
-                        for new_val in &new_values {
-                            let encoded = encode_index_value(new_val);
+                        for vals in &new_values {
+                            let encoded = encode_composite_value(vals);
                             records.push(InternalRecord::from_record(
                                 &Record::new(
                                     idx_key(store_name, &idx.name, &encoded, key_bytes),
@@ -972,6 +1021,345 @@ impl<'db> Drop for Transaction<'db> {
     }
 }
 
+// ── QueryBuilder ───────────────────────────────────────────────────
+
+/// Sort direction for [`QueryBuilder::order_by`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SortDir {
+    Asc,
+    Desc,
+}
+
+/// A type-safe query builder for JsonDB object stores.
+///
+/// Supports single-field and composite indexes, predicate pushdown, and
+/// optional `order_by`/`limit`/`offset`.
+///
+/// # Example
+///
+/// ```no_run
+/// use flowdb::jsondb::{JsonDB, SortDir};
+/// use serde_json::json;
+///
+/// let db = JsonDB::open(Default::default()).unwrap();
+/// db.create_object_store("users", "id").unwrap();
+/// db.create_index("users", "by_city_age", &["city", "age"], false).unwrap();
+/// db.put("users", json!({"id": "u1", "city": "NYC", "age": 30})).unwrap();
+///
+/// let docs: Vec<serde_json::Value> = db.query("users")
+///     .where_eq("city", json!("NYC"))
+///     .where_range("age", json!(25), json!(35))
+///     .order_by("age", SortDir::Asc)
+///     .limit(10)
+///     .collect()
+///     .unwrap();
+/// ```
+pub struct QueryBuilder<'a> {
+    db: &'a JsonDB,
+    store: &'a str,
+    filters: Vec<QueryFilter>,
+    order_field: Option<String>,
+    order_dir: SortDir,
+    limit: Option<usize>,
+    offset: usize,
+}
+
+#[derive(Debug, Clone)]
+enum QueryFilter {
+    Eq(String, Value),
+    Range(String, Value, Value),
+    In(String, Vec<Value>),
+}
+
+impl<'a> QueryBuilder<'a> {
+    /// Create a new query builder for the given store.
+    pub fn new(db: &'a JsonDB, store: &'a str) -> Self {
+        Self {
+            db,
+            store,
+            filters: Vec::new(),
+            order_field: None,
+            order_dir: SortDir::Asc,
+            limit: None,
+            offset: 0,
+        }
+    }
+
+    /// Filter: field == value.
+    pub fn where_eq(mut self, field: &str, value: Value) -> Self {
+        self.filters.push(QueryFilter::Eq(field.to_string(), value));
+        self
+    }
+
+    /// Filter: `start <= field < end` (exclusive upper bound).
+    pub fn where_range(mut self, field: &str, start: Value, end: Value) -> Self {
+        self.filters
+            .push(QueryFilter::Range(field.to_string(), start, end));
+        self
+    }
+
+    /// Filter: field IN [...values].
+    pub fn where_in(mut self, field: &str, values: Vec<Value>) -> Self {
+        self.filters.push(QueryFilter::In(field.to_string(), values));
+        self
+    }
+
+    /// Sort by `field` in ascending or descending order.
+    ///
+    /// When the sort field matches the first field of the best-matching index
+    /// **and** direction is `Asc`, the results are already in the correct order
+    /// and no extra sort is performed.
+    pub fn order_by(mut self, field: &str, dir: SortDir) -> Self {
+        self.order_field = Some(field.to_string());
+        self.order_dir = dir;
+        self
+    }
+
+    /// Limit results to `n` documents.
+    pub fn limit(mut self, n: usize) -> Self {
+        self.limit = Some(n);
+        self
+    }
+
+    /// Skip the first `n` documents.
+    pub fn offset(mut self, n: usize) -> Self {
+        self.offset = n;
+        self
+    }
+
+    /// Execute the query and return matching documents.
+    pub fn collect(self) -> Result<Vec<Value>> {
+        let store_def = self
+            .db
+            .schema
+            .get(self.store)
+            .ok_or_else(|| FlowError::JsonDb(format!("store '{}' not found", self.store)))?;
+
+        // 1. Find best matching index and compute scan range
+        let (scan_result, used_index) =
+            self.plan_scan(&store_def);
+
+        // 2. Execute scan
+        let mut docs: Vec<Value> = match scan_result {
+            ScanPlan::Index { prefix, range_start, range_end } => {
+                let range = if let (Some(s), Some(e)) = (&range_start, &range_end) {
+                    ScanRange {
+                        key_start: Bound::Included(s.to_vec()),
+                        key_end: Bound::Excluded(e.to_vec()),
+                        ts_start: Bound::Unbounded,
+                        ts_end: Bound::Unbounded,
+                    }
+                } else {
+                    prefix_range(&prefix)
+                };
+                let iter = self.db.engine.scan(range)?;
+                let mut results = Vec::new();
+                for r in iter {
+                    let rec = r?;
+                    if let Some(doc) =
+                        self.db.engine.get_bytes(&doc_key(self.store, &rec.value), 0)
+                    {
+                        results.push(decode_doc(&doc.value)?);
+                    }
+                }
+                results
+            }
+            ScanPlan::FullScan => {
+                let pfx = doc_prefix(self.store);
+                let iter = self.db.engine.scan(prefix_range(&pfx))?;
+                let mut results = Vec::new();
+                for r in iter {
+                    let rec = r?;
+                    results.push(decode_doc(&rec.value)?);
+                }
+                results
+            }
+        };
+
+        // 3. Apply predicate pushdown (remaining filters not covered by index)
+        for filter in &self.filters {
+            docs.retain(|doc| filter_matches(doc, filter));
+        }
+
+        // 4. Sort
+        let needs_sort = match &self.order_field {
+            Some(field) => {
+                // Skip sort if index provides Asc order on the first field
+                let index_provides_order = used_index
+                    .as_ref()
+                    .map(|idx: &IndexDef| {
+                        self.order_dir == SortDir::Asc
+                            && idx.key_paths.first().map(|s| s.as_str()) == Some(field.as_str())
+                    })
+                    .unwrap_or(false);
+                !index_provides_order
+            }
+            None => false,
+        };
+
+        if needs_sort {
+            if let Some(ref field) = self.order_field {
+                docs.sort_by(|a, b| {
+                    let va = extract_field(a, field).unwrap_or(Value::Null);
+                    let vb = extract_field(b, field).unwrap_or(Value::Null);
+                    let cmp = encode_index_value(&va).cmp(&encode_index_value(&vb));
+                    match self.order_dir {
+                        SortDir::Asc => cmp,
+                        SortDir::Desc => cmp.reverse(),
+                    }
+                });
+            }
+        }
+
+        // 5. Offset + limit
+        let docs: Vec<Value> = docs
+            .into_iter()
+            .skip(self.offset)
+            .take(self.limit.unwrap_or(usize::MAX))
+            .collect();
+
+        Ok(docs)
+    }
+}
+
+enum ScanPlan {
+    Index {
+        prefix: Vec<u8>,
+        range_start: Option<Vec<u8>>,
+        range_end: Option<Vec<u8>>,
+    },
+    FullScan,
+}
+
+/// Check whether a document matches a single filter.
+fn filter_matches(doc: &Value, filter: &QueryFilter) -> bool {
+    match filter {
+        QueryFilter::Eq(field, val) => {
+            extract_field(doc, field).as_ref() == Some(val)
+        }
+        QueryFilter::Range(field, start, end) => {
+            match extract_field(doc, field) {
+                Some(ref v) => {
+                    let enc = encode_index_value(v);
+                    let enc_start = encode_index_value(start);
+                    let enc_end = encode_index_value(end);
+                    enc.as_slice() >= enc_start.as_slice()
+                        && enc.as_slice() < enc_end.as_slice()
+                }
+                None => false,
+            }
+        }
+        QueryFilter::In(field, values) => {
+            match extract_field(doc, field) {
+                Some(ref v) => values.iter().any(|val| {
+                    encode_index_value(v) == encode_index_value(val)
+                }),
+                None => false,
+            }
+        }
+    }
+}
+
+impl<'a> QueryBuilder<'a> {
+    fn plan_scan(&self, store_def: &StoreDef) -> (ScanPlan, Option<IndexDef>) {
+        // Score each index by how many prefix fields match Eq/Range filters
+        let mut best: Option<(usize, &IndexDef)> = None;
+        for idx in &store_def.indexes {
+            let score = self.score_index(idx);
+            if score > best.map(|(s, _)| s).unwrap_or(0) {
+                best = Some((score, idx));
+            }
+        }
+
+        let (used_idx, plan) = match best {
+            Some((_, idx)) => {
+                let plan = self.build_index_scan(idx);
+                (Some(idx.clone()), plan)
+            }
+            None => (None, ScanPlan::FullScan),
+        };
+
+        (plan, used_idx)
+    }
+
+    /// Number of prefix key_paths covered by Eq/Range/In filters.
+    fn score_index(&self, idx: &IndexDef) -> usize {
+        let mut score = 0usize;
+        for path in &idx.key_paths {
+            let matched = self.filters.iter().any(|f| match f {
+                QueryFilter::Eq(field, _) => field == path,
+                QueryFilter::Range(field, _, _) => field == path,
+                QueryFilter::In(field, _) => field == path,
+            });
+            if matched {
+                score += 1;
+            } else {
+                break; // prefix stop: we can only use prefix of composite
+            }
+        }
+        score
+    }
+
+    fn build_index_scan(&self, idx: &IndexDef) -> ScanPlan {
+        // Collect one encoded value per key_path, building the prefix key.
+        let mut partial = idx_prefix(self.store, &idx.name);
+        let mut range_end_bytes: Option<Vec<u8>> = None;
+
+        for path in &idx.key_paths {
+            let matched = self.filters.iter().find(|f| match f {
+                QueryFilter::Eq(field, _) => field == path,
+                QueryFilter::Range(field, _, _) => field == path,
+                QueryFilter::In(field, _) => field == path,
+            });
+
+            match matched {
+                Some(QueryFilter::Eq(_, val)) => {
+                    let enc = encode_index_value(val);
+                    partial.extend_from_slice(&enc);
+                    partial.push(SEP);
+                }
+                Some(QueryFilter::Range(_, start, end)) => {
+                    let enc_start = encode_index_value(start);
+                    let enc_end = encode_index_value(end);
+                    partial.extend_from_slice(&enc_start);
+                    let mut end_key = idx_prefix(self.store, &idx.name);
+                    for prev_path in &idx.key_paths {
+                        if prev_path == path {
+                            end_key.extend_from_slice(&enc_end);
+                            break;
+                        }
+                        if let Some(QueryFilter::Eq(_, v)) = self.filters.iter().find(|filt| match filt {
+                            QueryFilter::Eq(field, _) => field == prev_path,
+                            _ => false,
+                        }) {
+                            end_key.extend_from_slice(&encode_index_value(v));
+                            end_key.push(SEP);
+                        }
+                    }
+                    range_end_bytes = Some(end_key);
+                    break;
+                }
+                Some(QueryFilter::In(_, _)) => break,
+                None => break,
+            }
+        }
+
+        if partial.last() == Some(&SEP) {
+            partial.pop();
+        }
+
+        ScanPlan::Index {
+            range_start: if !partial.is_empty() {
+                Some(partial.clone())
+            } else {
+                None
+            },
+            range_end: range_end_bytes,
+            prefix: partial,
+        }
+    }
+}
+
 // ── internal helpers ──────────────────────────────────────────────
 
 /// Build a batch of `InternalRecord`s for a document put.
@@ -994,8 +1382,8 @@ fn build_put_batch(
     if let Some(ref old_doc_val) = old_doc {
         for idx in &def.indexes {
             let old_values = extract_index_values(old_doc_val, idx);
-            for old_val in old_values {
-                let encoded = encode_index_value(&old_val);
+            for vals in old_values {
+                let encoded = encode_composite_value(&vals);
                 records.push(InternalRecord::delete(
                     idx_key(store, &idx.name, &encoded, key_bytes),
                     0,
@@ -1017,24 +1405,24 @@ fn build_put_batch(
 
         // Unique validation.
         if idx.unique {
-            for new_val in &new_values {
-                let encoded = encode_index_value(new_val);
+            for vals in &new_values {
+                let encoded = encode_composite_value(vals);
                 let val_pfx = idx_value_prefix(store, &idx.name, &encoded);
                 let iter = engine.scan(prefix_range(&val_pfx))?;
                 for r in iter {
                     let rec = r?;
                     if rec.value.as_slice() != key_bytes {
                         return Err(FlowError::JsonDb(format!(
-                            "unique constraint violation: index '{}' value '{}' already exists",
-                            idx.name, new_val
+                            "unique constraint violation: index '{}' value '{:?}' already exists",
+                            idx.name, vals
                         )));
                     }
                 }
             }
         }
 
-        for new_val in new_values {
-            let encoded = encode_index_value(&new_val);
+        for vals in new_values {
+            let encoded = encode_composite_value(&vals);
             records.push(InternalRecord::from_record(
                 &Record::new(
                     idx_key(store, &idx.name, &encoded, key_bytes),
@@ -1067,8 +1455,8 @@ fn build_delete_batch(
     if let Some(ref old_doc_val) = old_doc {
         for idx in &def.indexes {
             let old_values = extract_index_values(old_doc_val, idx);
-            for old_val in old_values {
-                let encoded = encode_index_value(&old_val);
+            for vals in old_values {
+                let encoded = encode_composite_value(&vals);
                 records.push(InternalRecord::delete(
                     idx_key(store, &idx.name, &encoded, key_bytes),
                     0,
@@ -1084,13 +1472,27 @@ fn build_delete_batch(
     Ok(records)
 }
 
-/// Extract index values from a document.
-fn extract_index_values(doc: &Value, idx: &IndexDef) -> Vec<Value> {
-    match extract_field(doc, &idx.key_path) {
-        None => vec![],
-        Some(Value::Array(arr)) if idx.multi_entry => arr,
-        Some(val) => vec![val],
+/// Extract index values from a document. Returns one entry per "row" in the
+/// index (for composite indexes this is one row with all field values; for
+/// multi-entry indexes it can be one row per array element).
+fn extract_index_values(doc: &Value, idx: &IndexDef) -> Vec<Vec<Value>> {
+    // Collect values for each key_path
+    let mut raw: Vec<Value> = Vec::with_capacity(idx.key_paths.len());
+    for path in &idx.key_paths {
+        match extract_field(doc, path) {
+            None => return vec![],
+            Some(val) => raw.push(val),
+        }
     }
+
+    // Multi-entry on single-field index: expand array elements
+    if idx.multi_entry && idx.key_paths.len() == 1 {
+        if let Value::Array(arr) = &raw[0] {
+            return arr.iter().map(|v| vec![v.clone()]).collect();
+        }
+    }
+
+    vec![raw]
 }
 
 /// Atomically increment an auto-increment counter and return the new value.
@@ -1136,8 +1538,8 @@ mod tests {
 
     fn setup_users(db: &JsonDB) {
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", "email", true).unwrap();
-        db.create_index("users", "by_age", "age", false).unwrap();
+        db.create_index("users", "by_email", &["email"], true).unwrap();
+        db.create_index("users", "by_age", &["age"], false).unwrap();
     }
 
     // ── basic CRUD ────────────────────────────────────────────────
@@ -1320,7 +1722,7 @@ mod tests {
         db.put("users", json!({"id": "u2", "email": "b@c.com"})).unwrap();
 
         // Now create the index.
-        db.create_index("users", "by_email", "email", true).unwrap();
+        db.create_index("users", "by_email", &["email"], true).unwrap();
 
         // Should be able to query by index.
         let docs = db.get_by_index("users", "by_email", &json!("a@b.com")).unwrap();
@@ -1426,7 +1828,7 @@ mod tests {
     fn test_transaction_atomicity() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", "email", true).unwrap();
+        db.create_index("users", "by_email", &["email"], true).unwrap();
 
         // This will fail because u1 already exists.
         db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
@@ -1477,7 +1879,7 @@ mod tests {
     fn test_create_delete_index() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", "email", true).unwrap();
+        db.create_index("users", "by_email", &["email"], true).unwrap();
 
         let def = db.get_store("users").unwrap();
         assert_eq!(def.indexes.len(), 1);
@@ -1548,7 +1950,7 @@ mod tests {
             };
             let db = JsonDB::open(cfg).unwrap();
             db.create_object_store("users", "id").unwrap();
-            db.create_index("users", "by_email", "email", true).unwrap();
+            db.create_index("users", "by_email", &["email"], true).unwrap();
             db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
             db.shutdown().unwrap();
         }
@@ -1706,15 +2108,15 @@ mod tests {
     fn test_create_index_duplicate() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", "email", true).unwrap();
-        let err = db.create_index("users", "by_email", "phone", true).unwrap_err();
+        db.create_index("users", "by_email", &["email"], true).unwrap();
+        let err = db.create_index("users", "by_email", &["phone"], true).unwrap_err();
         assert!(err.to_string().contains("already exists"));
     }
 
     #[test]
     fn test_create_index_missing_store() {
         let (db, _dir) = test_db();
-        let err = db.create_index("nonexistent", "idx", "field", false).unwrap_err();
+        let err = db.create_index("nonexistent", "idx", &["field"], false).unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
@@ -1936,7 +2338,7 @@ mod tests {
     fn test_index_on_nested_field() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_city", "address.city", false).unwrap();
+        db.create_index("users", "by_city", &["address.city"], false).unwrap();
         db.put("users", json!({"id": "u1", "address": {"city": "NYC"}})).unwrap();
         db.put("users", json!({"id": "u2", "address": {"city": "SF"}})).unwrap();
 
@@ -1949,7 +2351,7 @@ mod tests {
     fn test_index_on_field_not_present() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", "email", false).unwrap();
+        db.create_index("users", "by_email", &["email"], false).unwrap();
         // Doc without the indexed field
         db.put("users", json!({"id": "u1"})).unwrap();
         // Should not create index entry, so query returns no results
@@ -1961,7 +2363,7 @@ mod tests {
     fn test_index_float_values() {
         let (db, _dir) = test_db();
         db.create_object_store("scores", "id").unwrap();
-        db.create_index("scores", "by_score", "score", false).unwrap();
+        db.create_index("scores", "by_score", &["score"], false).unwrap();
 
         db.put("scores", json!({"id": "a", "score": 95.5})).unwrap();
         db.put("scores", json!({"id": "b", "score": 87.3})).unwrap();
@@ -1979,7 +2381,7 @@ mod tests {
     fn test_index_bool_values() {
         let (db, _dir) = test_db();
         db.create_object_store("items", "id").unwrap();
-        db.create_index("items", "by_active", "active", false).unwrap();
+        db.create_index("items", "by_active", &["active"], false).unwrap();
 
         db.put("items", json!({"id": 1, "active": true})).unwrap();
         db.put("items", json!({"id": 2, "active": false})).unwrap();
@@ -1997,7 +2399,7 @@ mod tests {
     fn test_index_null_values() {
         let (db, _dir) = test_db();
         db.create_object_store("users", "id").unwrap();
-        db.create_index("users", "by_email", "email", false).unwrap();
+        db.create_index("users", "by_email", &["email"], false).unwrap();
 
         db.put("users", json!({"id": "u1", "email": null})).unwrap();
 
@@ -2012,7 +2414,7 @@ mod tests {
     fn test_many_documents() {
         let (db, _dir) = test_db();
         db.create_object_store("large", "id").unwrap();
-        db.create_index("large", "by_val", "val", false).unwrap();
+        db.create_index("large", "by_val", &["val"], false).unwrap();
 
         let n = 200;
         for i in 0..n {
@@ -2040,7 +2442,7 @@ mod tests {
         let (db, _dir) = test_db();
         db.create_object_store("a", "id").unwrap();
         db.create_object_store("b", "id").unwrap();
-        db.create_index("a", "by_val", "val", false).unwrap();
+        db.create_index("a", "by_val", &["val"], false).unwrap();
 
         db.put("a", json!({"id": "a1", "val": 1})).unwrap();
         db.put("b", json!({"id": "b1", "val": 2})).unwrap();
@@ -2128,7 +2530,7 @@ mod tests {
 
         // Creating a unique index on existing data with duplicates succeeds
         // but subsequent put attempts will fail with unique violation.
-        db.create_index("users", "by_email", "email", true).unwrap();
+        db.create_index("users", "by_email", &["email"], true).unwrap();
 
         let err = db.put("users", json!({"id": "u3", "email": "same@b.com"})).unwrap_err();
         assert!(err.to_string().contains("unique"), "expected unique violation");
@@ -2169,12 +2571,12 @@ mod tests {
             name: "users".into(),
             key_path: "id".into(),
             auto_increment: false,
-            indexes: vec![IndexDef { name: "existing".into(), key_path: "f".into(), unique: false, multi_entry: false }],
+            indexes: vec![IndexDef { name: "existing".into(), key_paths: vec!["f".into()], unique: false, multi_entry: false }],
             next_auto_id: 0,
         };
-        assert!(validate_index_def(&def, "", "f").is_err());
-        assert!(validate_index_def(&def, "existing", "f").is_err());
-        assert!(validate_index_def(&def, "new", "").is_err());
+        assert!(validate_index_def(&def, "", &["f"]).is_err());
+        assert!(validate_index_def(&def, "existing", &["f"]).is_err());
+        assert!(validate_index_def(&def, "new", &[""]).is_err());
     }
 
     // Test the internal key encoding functions directly
@@ -2294,7 +2696,7 @@ mod tests {
             let cfg = Config { data_dir: path.clone(), auto_background: false, ..Default::default() };
             let db = JsonDB::open(cfg).unwrap();
             db.create_object_store("users", "id").unwrap();
-            db.create_index("users", "by_name", "name", false).unwrap();
+            db.create_index("users", "by_name", &["name"], false).unwrap();
             db.put("users", json!({"id": "u1", "name": "Alice"})).unwrap();
             db.shutdown().unwrap();
         }
@@ -2321,7 +2723,7 @@ mod tests {
             let cfg = Config { data_dir: path.clone(), auto_background: false, ..Default::default() };
             let db = JsonDB::open(cfg).unwrap();
             db.create_object_store("store", "id").unwrap();
-            db.create_index("store", "by_val", "val", true).unwrap();
+            db.create_index("store", "by_val", &["val"], true).unwrap();
             for i in 0u64..20 {
                 db.put("store", json!({"id": i, "val": format!("v{}", i)})).unwrap();
             }
@@ -2349,7 +2751,7 @@ mod tests {
     fn test_throughput_sequential_writes() {
         let (db, _dir) = test_db();
         db.create_object_store("bench", "id").unwrap();
-        db.create_index("bench", "by_val", "val", false).unwrap();
+        db.create_index("bench", "by_val", &["val"], false).unwrap();
 
         let n = 1_000;
         let start = std::time::Instant::now();
@@ -2371,7 +2773,7 @@ mod tests {
     fn test_throughput_point_reads() {
         let (db, _dir) = test_db();
         db.create_object_store("bench", "id").unwrap();
-        db.create_index("bench", "by_val", "val", false).unwrap();
+        db.create_index("bench", "by_val", &["val"], false).unwrap();
 
         let n = 1_000;
         for i in 0u64..n {
@@ -2396,7 +2798,7 @@ mod tests {
     fn test_throughput_index_query() {
         let (db, _dir) = test_db();
         db.create_object_store("bench", "id").unwrap();
-        db.create_index("bench", "by_val", "val", false).unwrap();
+        db.create_index("bench", "by_val", &["val"], false).unwrap();
 
         let n = 1_000;
         for i in 0u64..n {
@@ -2467,5 +2869,269 @@ mod tests {
             n, elapsed.as_secs_f64(), ops_per_sec
         );
         assert_eq!(db.count("auto").unwrap(), n);
+    }
+
+    // ── composite indexes ────────────────────────────────────────
+
+    #[test]
+    fn test_composite_index_equality() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        db.create_index("users", "by_city_age", &["city", "age"], false).unwrap();
+
+        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30})).unwrap();
+        db.put("users", json!({"id": "u2", "city": "NYC", "age": 25})).unwrap();
+        db.put("users", json!({"id": "u3", "city": "SF", "age": 30})).unwrap();
+
+        // Query by first field only (prefix scan)
+        let docs = db.get_by_index("users", "by_city_age", &json!("NYC")).unwrap();
+        assert_eq!(docs.len(), 2);
+
+        // Query by all fields (exact match)
+        let docs = db.get_by_index("users", "by_city_age", &json!(["NYC", 30])).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0]["id"], "u1");
+    }
+
+    #[test]
+    fn test_composite_index_update() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        db.create_index("users", "by_city_age", &["city", "age"], true).unwrap();
+
+        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30})).unwrap();
+
+        // Update city → old index entry removed, new one created
+        db.put("users", json!({"id": "u1", "city": "SF", "age": 30})).unwrap();
+
+        let docs = db.get_by_index("users", "by_city_age", &json!(["NYC", 30])).unwrap();
+        assert_eq!(docs.len(), 0, "old composite value should be gone");
+
+        let docs = db.get_by_index("users", "by_city_age", &json!(["SF", 30])).unwrap();
+        assert_eq!(docs.len(), 1);
+    }
+
+    #[test]
+    fn test_composite_index_unique() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        db.create_index("users", "by_city_age", &["city", "age"], true).unwrap();
+
+        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30})).unwrap();
+        let err = db.put("users", json!({"id": "u2", "city": "NYC", "age": 30})).unwrap_err();
+        assert!(err.to_string().contains("unique"), "composite unique should fail");
+
+        // Same city, different age → should succeed
+        db.put("users", json!({"id": "u2", "city": "NYC", "age": 25})).unwrap();
+        assert_eq!(db.count("users").unwrap(), 2);
+    }
+
+    #[test]
+    fn test_composite_index_on_existing_data() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30})).unwrap();
+        db.put("users", json!({"id": "u2", "city": "SF", "age": 25})).unwrap();
+
+        // Create composite on existing data
+        db.create_index("users", "by_city_age", &["city", "age"], false).unwrap();
+
+        let docs = db.get_by_index("users", "by_city_age", &json!(["NYC", 30])).unwrap();
+        assert_eq!(docs.len(), 1);
+    }
+
+    // ── QueryBuilder ────────────────────────────────────────────
+
+    #[test]
+    fn test_query_builder_eq() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        db.create_index("users", "by_email", &["email"], true).unwrap();
+        db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
+        db.put("users", json!({"id": "u2", "email": "b@c.com"})).unwrap();
+
+        let docs = db.query("users")
+            .where_eq("email", json!("a@b.com"))
+            .collect()
+            .unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0]["id"], "u1");
+    }
+
+    #[test]
+    fn test_query_builder_composite_eq() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        db.create_index("users", "by_city_age", &["city", "age"], false).unwrap();
+        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30})).unwrap();
+        db.put("users", json!({"id": "u2", "city": "NYC", "age": 25})).unwrap();
+        db.put("users", json!({"id": "u3", "city": "SF", "age": 30})).unwrap();
+
+        let docs = db.query("users")
+            .where_eq("city", json!("NYC"))
+            .where_eq("age", json!(30))
+            .collect()
+            .unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0]["id"], "u1");
+    }
+
+    #[test]
+    fn test_query_builder_range() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        db.create_index("users", "by_age", &["age"], false).unwrap();
+        db.put("users", json!({"id": "u1", "age": 30})).unwrap();
+        db.put("users", json!({"id": "u2", "age": 25})).unwrap();
+        db.put("users", json!({"id": "u3", "age": 35})).unwrap();
+
+        let docs = db.query("users")
+            .where_range("age", json!(25), json!(35))
+            .collect()
+            .unwrap();
+        assert_eq!(docs.len(), 2); // age 25 ≤ docs < 35
+    }
+
+    #[test]
+    fn test_query_builder_eq_and_range() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        db.create_index("users", "by_city_age", &["city", "age"], false).unwrap();
+        db.put("users", json!({"id": "u1", "city": "NYC", "age": 30})).unwrap();
+        db.put("users", json!({"id": "u2", "city": "NYC", "age": 25})).unwrap();
+        db.put("users", json!({"id": "u3", "city": "SF", "age": 30})).unwrap();
+
+        let docs = db.query("users")
+            .where_eq("city", json!("NYC"))
+            .where_range("age", json!(20), json!(30))
+            .collect()
+            .unwrap();
+        assert_eq!(docs.len(), 1); // age 20-30 in NYC → u2 (age 25). age 30 is exclusive.
+        assert_eq!(docs[0]["id"], "u2");
+    }
+
+    #[test]
+    fn test_query_builder_limit_offset() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        for i in 0..10 {
+            db.put("users", json!({"id": i, "val": i})).unwrap();
+        }
+
+        let docs = db.query("users")
+            .limit(3)
+            .collect()
+            .unwrap();
+        assert_eq!(docs.len(), 3);
+
+        let docs = db.query("users")
+            .offset(5)
+            .limit(3)
+            .collect()
+            .unwrap();
+        assert_eq!(docs.len(), 3);
+    }
+
+    #[test]
+    fn test_query_builder_order_by_asc() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        db.create_index("users", "by_age", &["age"], false).unwrap();
+        db.put("users", json!({"id": "u1", "age": 30})).unwrap();
+        db.put("users", json!({"id": "u2", "age": 25})).unwrap();
+        db.put("users", json!({"id": "u3", "age": 35})).unwrap();
+
+        let docs = db.query("users")
+            .order_by("age", SortDir::Asc)
+            .collect()
+            .unwrap();
+        assert_eq!(docs.len(), 3);
+        assert_eq!(docs[0]["id"], "u2"); // age 25
+        assert_eq!(docs[1]["id"], "u1"); // age 30
+        assert_eq!(docs[2]["id"], "u3"); // age 35
+    }
+
+    #[test]
+    fn test_query_builder_order_by_desc() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        db.put("users", json!({"id": "u1", "age": 30})).unwrap();
+        db.put("users", json!({"id": "u2", "age": 25})).unwrap();
+
+        let docs = db.query("users")
+            .order_by("age", SortDir::Desc)
+            .collect()
+            .unwrap();
+        assert_eq!(docs.len(), 2);
+        assert_eq!(docs[0]["id"], "u1"); // age 30
+        assert_eq!(docs[1]["id"], "u2"); // age 25
+    }
+
+    #[test]
+    fn test_query_builder_where_in() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        db.put("users", json!({"id": "u1", "city": "NYC"})).unwrap();
+        db.put("users", json!({"id": "u2", "city": "SF"})).unwrap();
+        db.put("users", json!({"id": "u3", "city": "LA"})).unwrap();
+
+        let docs = db.query("users")
+            .where_in("city", vec![json!("NYC"), json!("LA")])
+            .collect()
+            .unwrap();
+        assert_eq!(docs.len(), 2);
+    }
+
+    #[test]
+    fn test_query_builder_no_matching_index() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        db.put("users", json!({"id": "u1", "color": "red"})).unwrap();
+        db.put("users", json!({"id": "u2", "color": "blue"})).unwrap();
+
+        // No index on "color" → full scan with filter
+        let docs = db.query("users")
+            .where_eq("color", json!("red"))
+            .collect()
+            .unwrap();
+        assert_eq!(docs.len(), 1);
+    }
+
+    #[test]
+    fn test_query_builder_store_not_found() {
+        let (db, _dir) = test_db();
+        let err = db.query("nonexistent").collect().unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_query_builder_bool_index() {
+        let (db, _dir) = test_db();
+        db.create_object_store("items", "id").unwrap();
+        db.create_index("items", "by_active", &["active"], false).unwrap();
+        db.put("items", json!({"id": 1, "active": true})).unwrap();
+        db.put("items", json!({"id": 2, "active": false})).unwrap();
+
+        let docs = db.query("items")
+            .where_eq("active", json!(true))
+            .collect()
+            .unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0]["id"], 1);
+    }
+
+    #[test]
+    fn test_query_builder_with_transaction_roundtrip() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        db.create_index("users", "by_email", &["email"], true).unwrap();
+        db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
+
+        // QueryBuilder sees committed data
+        let docs = db.query("users")
+            .where_eq("email", json!("a@b.com"))
+            .collect()
+            .unwrap();
+        assert_eq!(docs.len(), 1);
     }
 }

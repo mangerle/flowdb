@@ -4,15 +4,60 @@ use crate::error::{FlowError, Result};
 use crate::jsondb::encoding::{schema_key, schema_prefix, validate_name};
 use crate::record::{InternalRecord, ScanRange};
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct IndexDef {
+    #[serde(alias = "key_path")]
+    pub key_paths: Vec<String>,
     pub name: String,
-    pub key_path: String,
     pub unique: bool,
     pub multi_entry: bool,
+}
+
+/// Custom deserialize: accepts both old `"key_path": "single"` and
+/// new `"key_paths": ["a", "b"]` (or `"key_path": ["a","b"]` via alias).
+impl<'de> Deserialize<'de> for IndexDef {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            name: String,
+            #[serde(alias = "key_paths")]
+            key_path: serde_json::Value,
+            unique: Option<bool>,
+            multi_entry: Option<bool>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let key_paths = match raw.key_path {
+            serde_json::Value::String(s) => vec![s],
+            serde_json::Value::Array(arr) => arr
+                .into_iter()
+                .filter_map(|v| match v {
+                    serde_json::Value::String(s) => Some(s),
+                    _ => None,
+                })
+                .collect(),
+            _ => {
+                return Err(D::Error::custom(
+                    "key_paths must be a string or array of strings",
+                ))
+            }
+        };
+        if key_paths.is_empty() {
+            return Err(D::Error::custom("key_paths must not be empty"));
+        }
+        Ok(IndexDef {
+            name: raw.name,
+            key_paths,
+            unique: raw.unique.unwrap_or(false),
+            multi_entry: raw.multi_entry.unwrap_or(false),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,14 +129,10 @@ pub(crate) fn validate_store_def(name: &str, key_path: &str) -> Result<()> {
 }
 
 /// Validate and create a new index definition.
-pub(crate) fn validate_index_def(
-    store: &StoreDef,
-    name: &str,
-    key_path: &str,
-) -> Result<()> {
+pub(crate) fn validate_index_def(store: &StoreDef, name: &str, key_paths: &[&str]) -> Result<()> {
     validate_name(name)?;
-    if key_path.is_empty() {
-        return Err(FlowError::JsonDb("index key_path cannot be empty".into()));
+    if key_paths.is_empty() || key_paths.iter().any(|p| p.is_empty()) {
+        return Err(FlowError::JsonDb("index key_paths cannot be empty".into()));
     }
     if store.indexes.iter().any(|i| i.name == name) {
         return Err(FlowError::JsonDb(format!(
@@ -129,7 +170,7 @@ mod tests {
             auto_increment: false,
             indexes: vec![IndexDef {
                 name: "by_email".into(),
-                key_path: "email".into(),
+                key_paths: vec!["email".into()],
                 unique: true,
                 multi_entry: false,
             }],
@@ -158,20 +199,17 @@ mod tests {
             auto_increment: false,
             indexes: vec![IndexDef {
                 name: "existing".into(),
-                key_path: "f".into(),
+                key_paths: vec!["f".into()],
                 unique: true,
                 multi_entry: false,
             }],
             next_auto_id: 0,
         };
-        // empty name
-        assert!(validate_index_def(&store, "", "f").is_err());
-        // empty key_path
-        assert!(validate_index_def(&store, "new", "").is_err());
-        // duplicate name
-        assert!(validate_index_def(&store, "existing", "f").is_err());
-        // valid
-        assert!(validate_index_def(&store, "new", "f").is_ok());
+        assert!(validate_index_def(&store, "", &["f"]).is_err());
+        assert!(validate_index_def(&store, "new", &[""]).is_err());
+        assert!(validate_index_def(&store, "existing", &["f"]).is_err());
+        assert!(validate_index_def(&store, "new", &["f"]).is_ok());
+        assert!(validate_index_def(&store, "new", &["a", "b"]).is_ok());
     }
 
     #[test]
@@ -208,5 +246,51 @@ mod tests {
     fn test_schema_default() {
         let schema: Schema = Default::default();
         assert!(schema.list().is_empty());
+    }
+
+    // ── backward compat deserialization ───────────────────────────
+
+    #[test]
+    fn test_index_def_deserialize_old_key_path_string() {
+        let json = r#"{"name":"by_email","key_path":"email","unique":true,"multi_entry":false}"#;
+        let idx: IndexDef = serde_json::from_str(json).unwrap();
+        assert_eq!(idx.key_paths, vec!["email"]);
+        assert!(idx.unique);
+    }
+
+    #[test]
+    fn test_index_def_deserialize_old_key_path_array() {
+        let json =
+            r#"{"name":"by_city_age","key_path":["city","age"],"unique":false,"multi_entry":false}"#;
+        let idx: IndexDef = serde_json::from_str(json).unwrap();
+        assert_eq!(idx.key_paths, vec!["city", "age"]);
+    }
+
+    #[test]
+    fn test_index_def_deserialize_new_key_paths_array() {
+        let json =
+            r#"{"name":"by_city_age","key_paths":["city","age"],"unique":false,"multi_entry":false}"#;
+        let idx: IndexDef = serde_json::from_str(json).unwrap();
+        assert_eq!(idx.key_paths, vec!["city", "age"]);
+    }
+
+    #[test]
+    fn test_index_def_deserialize_empty_key_paths_rejected() {
+        let json = r#"{"name":"bad","key_paths":[],"unique":false,"multi_entry":false}"#;
+        assert!(serde_json::from_str::<IndexDef>(json).is_err());
+    }
+
+    #[test]
+    fn test_index_def_serialize_new_format() {
+        let idx = IndexDef {
+            name: "by_city_age".into(),
+            key_paths: vec!["city".into(), "age".into()],
+            unique: false,
+            multi_entry: false,
+        };
+        let json = serde_json::to_string(&idx).unwrap();
+        assert!(json.contains(r#""key_paths""#));
+        assert!(json.contains(r#""city""#));
+        assert!(json.contains(r#""age""#));
     }
 }

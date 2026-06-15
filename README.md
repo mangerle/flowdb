@@ -107,32 +107,38 @@ serde_json = "1"
 ```
 
 ```rust
-use flowdb::jsondb::{JsonDB, TransactionMode};
+use flowdb::jsondb::{JsonDB, TransactionMode, SortDir};
 use serde_json::json;
 
 let db = JsonDB::open(Default::default())?;
 
 // Define schema (like IndexedDB onupgradeneeded)
 db.create_object_store("users", "id")?;
-db.create_index("users", "by_email", "email", true)?;   // unique index
-db.create_index("users", "by_age",   "age",   false)?;  // non-unique
+db.create_index("users", "by_email", &["email"], true)?;   // unique single-field
+db.create_index("users", "by_age",   &["age"],   false)?;  // non-unique single-field
+db.create_index("users", "by_city_age", &["city", "age"], false)?; // composite!
 
 // Simple operations (auto-commit)
-db.put("users", json!({"id": "u1", "email": "a@b.com", "age": 30}))?;
+db.put("users", json!({"id": "u1", "email": "a@b.com", "age": 30, "city": "NYC"}))?;
 let doc = db.get("users", &json!("u1"))?;
-assert_eq!(doc.unwrap()["email"], "a@b.com");
 
-// Index queries
+// Index queries (single-field)
 let docs = db.get_by_index("users", "by_email", &json!("a@b.com"))?;
-assert_eq!(docs.len(), 1);
 
-let docs = db.range_by_index("users", "by_age", &json!(18), &json!(65))?;
-assert_eq!(docs.len(), 1);
+// Index queries (composite — exact match on all fields)
+let docs = db.get_by_index("users", "by_city_age", &json!(["NYC", 30]))?;
+
+// QueryBuilder — type-safe composite queries with filters, order_by, limit
+let docs: Vec<serde_json::Value> = db.query("users")
+    .where_eq("city", json!("NYC"))
+    .where_range("age", json!(25), json!(35))
+    .order_by("age", SortDir::Asc)
+    .limit(10)
+    .collect()?;
 
 // Explicit transaction (atomic batch commit)
 let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite)?;
 tx.put("users", json!({"id": "u2", "email": "b@c.com", "age": 25}))?;
-tx.put("users", json!({"id": "u3", "email": "c@d.com", "age": 35}))?;
 tx.commit()?; // all-or-nothing
 ```
 
