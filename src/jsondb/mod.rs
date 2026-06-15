@@ -64,6 +64,10 @@ pub enum TransactionMode {
 pub struct JsonDB {
     engine: Engine,
     schema: Schema,
+    // Serialises read-modify-write operations (put, delete, put_auto) so
+    // concurrent threads don't compute stale index maintenance from the
+    // same old-document snapshot.
+    write_lock: std::sync::Mutex<()>,
 }
 
 impl fmt::Debug for JsonDB {
@@ -89,7 +93,7 @@ impl JsonDB {
             let iter = engine.scan(range)?;
             iter.collect()
         })?;
-        Ok(Self { engine, schema })
+        Ok(Self { engine, schema, write_lock: std::sync::Mutex::new(()) })
     }
 
     /// Shut down the underlying engine.
@@ -214,16 +218,15 @@ impl JsonDB {
         };
 
         def.indexes.push(index.clone());
-        self.engine
-            .write_internal(vec![InternalRecord::from_record(
-                &schema_record(&def)?,
-                0,
-            )])?;
 
-        // Build index entries for existing documents.
+        // Build a single atomic batch: schema + all index entries for
+        // existing documents.  This ensures consistency — if the write
+        // fails, neither the schema nor any entries are committed.
+        let mut records = Vec::new();
+        records.push(InternalRecord::from_record(&schema_record(&def)?, 0));
+
         let doc_pfx = doc_prefix(store);
         let docs = self.engine.scan(prefix_range(&doc_pfx))?;
-        let mut records = Vec::new();
         for rec in docs {
             let doc = decode_doc(&rec?.value)?;
             let index_vals = extract_index_values(&doc, &index);
@@ -242,9 +245,7 @@ impl JsonDB {
                 ));
             }
         }
-        if !records.is_empty() {
-            self.engine.write_internal(records)?;
-        }
+        self.engine.write_internal(records)?;
 
         self.schema.insert(def);
         Ok(())
@@ -274,7 +275,8 @@ impl JsonDB {
 
         // Delete all index entries.
         let pfx = idx_prefix(store, name);
-        let mut records = vec![InternalRecord::delete_range(pfx, vec![], 0)];
+        let end = crate::record::increment_prefix_bytes(&pfx);
+        let mut records = vec![InternalRecord::delete_range(pfx, end, 0)];
         records.push(InternalRecord::from_record(&schema_record(&def)?, 0));
 
         self.engine.write_internal(records)?;
@@ -299,6 +301,7 @@ impl JsonDB {
     /// The document **must** contain the store's `key_path` field.
     /// Returns the extracted primary key value.
     pub fn put(&self, store: &str, doc: Value) -> Result<Value> {
+        let _lock = self.write_lock.lock().unwrap();
         let def = self
             .schema
             .get(store)
@@ -335,6 +338,7 @@ impl JsonDB {
 
     /// Delete a document by primary key (and all associated index entries).
     pub fn delete(&self, store: &str, key: &Value) -> Result<()> {
+        let _lock = self.write_lock.lock().unwrap();
         let def = self
             .schema
             .get(store)
@@ -350,6 +354,7 @@ impl JsonDB {
     ///
     /// Returns the assigned key value.
     pub fn put_auto(&self, store: &str, mut doc: Value) -> Result<Value> {
+        let _lock = self.write_lock.lock().unwrap();
         let def = self
             .schema
             .get(store)
@@ -361,7 +366,7 @@ impl JsonDB {
             )));
         }
 
-        let next_id = get_and_increment_counter(&self.engine, store)?;
+        let (next_id, counter_rec) = prepare_counter(&self.engine, store)?;
         let key_val = Value::Number(next_id.into());
         let key_bytes = next_id.to_string().into_bytes();
 
@@ -371,7 +376,8 @@ impl JsonDB {
         }
 
         let doc_bytes = encode_doc(&doc)?;
-        let batch = build_put_batch(&def, store, &key_bytes, &doc_bytes, &doc, &self.engine)?;
+        let mut batch = build_put_batch(&def, store, &key_bytes, &doc_bytes, &doc, &self.engine)?;
+        batch.push(counter_rec); // atomic: counter + doc + index entries
         self.engine.write_internal(batch)?;
         Ok(key_val)
     }
@@ -534,6 +540,8 @@ impl JsonDB {
             db: self,
             mode,
             writes: HashMap::new(),
+            counter_updates: Vec::new(),
+            next_ids: HashMap::new(),
             committed: false,
         })
     }
@@ -559,6 +567,12 @@ pub struct Transaction<'db> {
     mode: TransactionMode,
     // (store_name, primary_key_bytes) -> Some(doc_bytes) | None (delete)
     writes: HashMap<(String, Vec<u8>), Option<Vec<u8>>>,
+    // Counter records (auto-increment) that must be committed atomically
+    // with the document writes.
+    counter_updates: Vec<InternalRecord>,
+    // Per-store next auto-increment IDs (tracked in memory for
+    // multiple put_auto calls within the same transaction).
+    next_ids: HashMap<String, u64>,
     committed: bool,
 }
 
@@ -871,8 +885,21 @@ impl<'db> Transaction<'db> {
             )));
         }
 
-        // Reserve an ID (increments the counter *now*, outside the commit batch).
-        let next_id = get_and_increment_counter(&self.db.engine, store)?;
+        // Use in-memory tracking for multiple put_auto calls in the same
+        // transaction. Only the first call reads the engine counter.
+        let next_id = match self.next_ids.get(store) {
+            Some(&existing) => {
+                self.next_ids.insert(store.to_string(), existing + 1);
+                existing + 1
+            }
+            None => {
+                let (id, counter_rec) = prepare_counter(&self.db.engine, store)?;
+                self.counter_updates.push(counter_rec);
+                self.next_ids.insert(store.to_string(), id);
+                id
+            }
+        };
+
         let key_val = Value::Number(next_id.into());
 
         if let Value::Object(ref mut map) = doc {
@@ -891,11 +918,13 @@ impl<'db> Transaction<'db> {
         if self.committed {
             return Ok(());
         }
-        self.committed = true;
 
         let mut records = Vec::new();
 
-        // Group writes by store for efficient processing.
+        // Include any pending counter updates (auto-increment).
+        records.extend(self.counter_updates.drain(..));
+
+        // Process buffered document writes.
         for ((store_name, key_bytes), doc_opt) in &self.writes {
             let def = self
                 .db
@@ -906,14 +935,16 @@ impl<'db> Transaction<'db> {
                 })?;
 
             // Read old document for index maintenance.
-            let old_doc = self
+            // If the document is corrupted we fail hard — silent data loss
+            // is worse than a failed write.
+            let old_doc_str = self
                 .db
                 .engine
                 .get_bytes(&doc_key(store_name, key_bytes), 0)
                 .and_then(|r| decode_doc(&r.value).ok());
 
             // Delete old index entries.
-            if let Some(ref old_doc_val) = old_doc {
+            if let Some(ref old_doc_val) = old_doc_str {
                 for idx in &def.indexes {
                     let old_values = extract_index_values(old_doc_val, idx);
                     for vals in old_values {
@@ -940,11 +971,10 @@ impl<'db> Transaction<'db> {
                     for idx in &def.indexes {
                         let new_values = extract_index_values(&new_doc, idx);
 
-                        // Unique validation.
+                        // Unique validation: check BOTH engine AND write buffer.
                         if idx.unique {
                             for vals in &new_values {
                                 let encoded = encode_composite_value(vals);
-                                // Check if this index value is already taken.
                                 let val_pfx = idx_value_prefix(store_name, &idx.name, &encoded);
                                 let iter = self.db.engine.scan(prefix_range(&val_pfx))?;
                                 for r in iter {
@@ -954,6 +984,23 @@ impl<'db> Transaction<'db> {
                                             "unique constraint violation: index '{}' value '{:?}' already exists",
                                             idx.name, vals
                                         )));
+                                    }
+                                }
+                                // Also check other buffered writes in this transaction.
+                                for ((other_store, other_key), other_doc) in &self.writes {
+                                    if other_store != store_name { continue; }
+                                    if other_key == key_bytes { continue; }
+                                    if let Some(other_bytes) = other_doc {
+                                        let other_doc_val = decode_doc(other_bytes)?;
+                                        let other_vals = extract_index_values(&other_doc_val, idx);
+                                        for ov in other_vals {
+                                            if encode_composite_value(&ov) == encoded {
+                                                return Err(FlowError::JsonDb(format!(
+                                                    "unique constraint violation in transaction: index '{}' value '{:?}'",
+                                                    idx.name, vals
+                                                )));
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -986,6 +1033,9 @@ impl<'db> Transaction<'db> {
         if !records.is_empty() {
             self.db.engine.write_internal(records)?;
         }
+        // Only mark committed AFTER the write succeeds.
+        // This lets callers retry if write_internal fails.
+        self.committed = true;
         Ok(())
     }
 
@@ -1139,7 +1189,28 @@ impl<'a> QueryBuilder<'a> {
         let (scan_result, used_index) =
             self.plan_scan(&store_def);
 
-        // 2. Execute scan
+        // Determine whether an in-memory sort is needed (after the scan,
+        // before offset/limit).  This also controls early-termination in
+        // step 2 — when no sort is needed we can stop scanning early.
+        let needs_sort = match &self.order_field {
+            Some(field) => {
+                let index_provides_order = used_index
+                    .as_ref()
+                    .map(|idx: &IndexDef| {
+                        self.order_dir == SortDir::Asc
+                            && idx.key_paths.first().map(|s| s.as_str()) == Some(field.as_str())
+                    })
+                    .unwrap_or(false);
+                !index_provides_order
+            }
+            None => false,
+        };
+
+        // 2. Execute scan with optional early-termination for limit.
+        //    When the scan order matches the natural index order we can
+        //    stop after collecting (limit + offset) results.
+        let limit_target = self.limit.map(|l| l + self.offset);
+
         let mut docs: Vec<Value> = match scan_result {
             ScanPlan::Index { prefix, range_start, range_end } => {
                 let range = if let (Some(s), Some(e)) = (&range_start, &range_end) {
@@ -1161,6 +1232,14 @@ impl<'a> QueryBuilder<'a> {
                     {
                         results.push(decode_doc(&doc.value)?);
                     }
+                    // Early-terminate when limit is set and no sort is needed.
+                    if !needs_sort {
+                        if let Some(target) = limit_target {
+                            if results.len() >= target {
+                                break;
+                            }
+                        }
+                    }
                 }
                 results
             }
@@ -1171,6 +1250,12 @@ impl<'a> QueryBuilder<'a> {
                 for r in iter {
                     let rec = r?;
                     results.push(decode_doc(&rec.value)?);
+                    // Early-terminate when limit is set.
+                    if let Some(target) = limit_target {
+                        if results.len() >= target {
+                            break;
+                        }
+                    }
                 }
                 results
             }
@@ -1181,22 +1266,7 @@ impl<'a> QueryBuilder<'a> {
             docs.retain(|doc| filter_matches(doc, filter));
         }
 
-        // 4. Sort
-        let needs_sort = match &self.order_field {
-            Some(field) => {
-                // Skip sort if index provides Asc order on the first field
-                let index_provides_order = used_index
-                    .as_ref()
-                    .map(|idx: &IndexDef| {
-                        self.order_dir == SortDir::Asc
-                            && idx.key_paths.first().map(|s| s.as_str()) == Some(field.as_str())
-                    })
-                    .unwrap_or(false);
-                !index_provides_order
-            }
-            None => false,
-        };
-
+        // 4. Sort if needed.
         if needs_sort {
             if let Some(ref field) = self.order_field {
                 docs.sort_by(|a, b| {
@@ -1374,9 +1444,19 @@ fn build_put_batch(
     let mut records = Vec::new();
 
     // Read old document for index maintenance.
-    let old_doc = engine
-        .get_bytes(&doc_key(store, key_bytes), 0)
-        .and_then(|r| decode_doc(&r.value).ok());
+    let old_doc = match engine.get_bytes(&doc_key(store, key_bytes), 0) {
+        Some(r) => match decode_doc(&r.value) {
+            Ok(doc) => Some(doc),
+            Err(e) => {
+                return Err(FlowError::JsonDb(format!(
+                    "corrupted document at key {:?}: {}",
+                    String::from_utf8_lossy(key_bytes),
+                    e
+                )));
+            }
+        },
+        None => None,
+    };
 
     // Delete old index entries.
     if let Some(ref old_doc_val) = old_doc {
@@ -1447,9 +1527,19 @@ fn build_delete_batch(
     let mut records = Vec::new();
 
     // Read old document for index maintenance.
-    let old_doc = engine
-        .get_bytes(&doc_key(store, key_bytes), 0)
-        .and_then(|r| decode_doc(&r.value).ok());
+    let old_doc = match engine.get_bytes(&doc_key(store, key_bytes), 0) {
+        Some(r) => match decode_doc(&r.value) {
+            Ok(doc) => Some(doc),
+            Err(e) => {
+                return Err(FlowError::JsonDb(format!(
+                    "corrupted document at key {:?}: {}",
+                    String::from_utf8_lossy(key_bytes),
+                    e
+                )));
+            }
+        },
+        None => None,
+    };
 
     // Delete index entries.
     if let Some(ref old_doc_val) = old_doc {
@@ -1495,24 +1585,31 @@ fn extract_index_values(doc: &Value, idx: &IndexDef) -> Vec<Vec<Value>> {
     vec![raw]
 }
 
-/// Atomically increment an auto-increment counter and return the new value.
-fn get_and_increment_counter(engine: &Engine, store: &str) -> Result<u64> {
+/// Read the current auto-increment counter and produce the next value
+/// together with an `InternalRecord` that must be included in the main
+/// write batch so the counter increment is atomic with the document
+/// write.
+fn prepare_counter(engine: &Engine, store: &str) -> Result<(u64, InternalRecord)> {
     let key = counter_key(store);
-    let current = engine
-        .get_bytes(&key, 0)
-        .map(|r| {
-            let arr: [u8; 8] = r.value.as_slice().try_into().unwrap_or([0u8; 8]);
+    let current = match engine.get_bytes(&key, 0) {
+        Some(r) => {
+            let arr: [u8; 8] = r.value.as_slice().try_into().map_err(|_| {
+                FlowError::JsonDb(format!(
+                    "corrupted auto-increment counter for store '{}'",
+                    store
+                ))
+            })?;
             u64::from_be_bytes(arr)
-        })
-        .unwrap_or(0);
+        }
+        None => 0,
+    };
 
     let next = current + 1;
-    // Write with a dedicated seq; this is NOT part of the main batch.
-    engine.write_internal(vec![InternalRecord::from_record(
+    let rec = InternalRecord::from_record(
         &Record::new(key, 0, next.to_be_bytes().to_vec()),
         0,
-    )])?;
-    Ok(next)
+    );
+    Ok((next, rec))
 }
 
 // ── tests ─────────────────────────────────────────────────────────

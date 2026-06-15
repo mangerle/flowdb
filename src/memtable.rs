@@ -31,12 +31,13 @@ impl MemTable {
         self.records.push(rec);
     }
 
+    /// Get the record with the highest seq for a given (key, ts).
+    /// Uses max_by_key so this works regardless of internal sort order.
     pub fn get(&self, key: &[u8], ts: i64) -> Option<&InternalRecord> {
-        // Linear scan for the highest-seq record matching (key, ts).
         self.records
             .iter()
-            .rev()
-            .find(|r| r.key.as_slice() == key && r.ts == ts)
+            .filter(|r| r.key.as_slice() == key && r.ts == ts)
+            .max_by_key(|r| r.seq)
     }
 
     pub fn query_prefix(&self, key: &[u8], now_us: i64) -> Vec<&InternalRecord> {
