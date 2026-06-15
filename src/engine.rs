@@ -107,7 +107,9 @@ impl Engine {
                     let now = std::time::Instant::now();
 
                     if now.duration_since(last_flush) >= flush_dur {
-                        let _ = worker.lock().do_flush();
+                        if let Err(e) = worker.lock().do_flush() {
+                            tracing::error!("Background flush failed: {}", e);
+                        }
                         last_flush = std::time::Instant::now();
                     }
 
@@ -125,9 +127,20 @@ impl Engine {
                                 cache.clone(),
                                 stats.clone(),
                             );
-                            if compaction.run().unwrap_or(false) {
-                                evict_stale_readers(&readers, &manifest);
-                                let _ = manifest.lock().maybe_snapshot();
+                            match compaction.run() {
+                                Ok(true) => {
+                                    evict_stale_readers(&readers, &manifest);
+                                    if let Err(e) = manifest.lock().maybe_snapshot() {
+                                        tracing::error!(
+                                            "Manifest snapshot after compaction failed: {}",
+                                            e
+                                        );
+                                    }
+                                }
+                                Ok(false) => {}
+                                Err(e) => {
+                                    tracing::error!("Compaction failed: {}", e);
+                                }
                             }
                         }
                         last_compact = std::time::Instant::now();
@@ -141,15 +154,23 @@ impl Engine {
                             cache.clone(),
                             stats.clone(),
                         );
-                        if gc.run().unwrap_or(0) > 0 {
-                            evict_stale_readers(&readers, &manifest);
+                        match gc.run() {
+                            Ok(n) if n > 0 => {
+                                evict_stale_readers(&readers, &manifest);
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::error!("GC failed: {}", e);
+                            }
                         }
                         last_gc = std::time::Instant::now();
                     }
 
                     if now.duration_since(last_sync) >= wal_sync_dur {
                         let mut wr = worker.lock();
-                        let _ = wr.wal.sync_all();
+                        if let Err(e) = wr.wal.sync_all() {
+                            tracing::error!("WAL sync failed: {}", e);
+                        }
                         last_sync = std::time::Instant::now();
                     }
                 }
@@ -847,17 +868,96 @@ impl Engine {
     }
 
     /// Get the latest record for a given key (highest `ts`).
-    /// Uses a bounded prefix scan and returns the last record.
+    ///
+    /// Unlike the old scan-then-last approach which is O(n) in the number
+    /// of versions, this walks memtables and SST blocks via the block
+    /// index, yielding O(log n) or O(k) where k is the number of blocks.
     pub fn get_latest(&self, key: &str) -> Result<Option<Record>> {
-        // Use scan with prefix == key to find all versions, then take last
-        let range = ScanRange::prefix(key);
-        let iter = self.scan(range)?;
-        // Walk to the end (records come in (key, ts) ascending order)
-        let mut latest: Option<Record> = None;
-        for r in iter {
-            latest = Some(r?);
+        let now_us = now_micros();
+        let key_bytes = key.as_bytes();
+
+        // 1) Check memtables — fast, doesn't touch the index.
+        let mem_latest = self.memtables.get_latest(key_bytes, now_us);
+
+        // 2) Check SST blocks via the block meta index.
+        let idx = self.index.read();
+        let sst_latest: Option<Record> = idx.query_point_inline(key_bytes, now_us, |meta| {
+            self.block_search_latest(key_bytes, now_us, meta.sst_id, meta.block_idx)
+        });
+        drop(idx);
+
+        // 3) Merge: whichever has higher ts, with memtable winning ties
+        //    (memtable always has higher seq than any SST record).
+        match (mem_latest, sst_latest) {
+            (Some(m), Some(s)) => {
+                if m.ts >= s.ts {
+                    Ok(Some(m.to_record()))
+                } else {
+                    Ok(Some(s))
+                }
+            }
+            (Some(m), None) => Ok(Some(m.to_record())),
+            (None, Some(s)) => Ok(Some(s)),
+            (None, None) => Ok(None),
         }
-        Ok(latest)
+    }
+
+    /// Scan a single decompressed block for the latest version of `key`.
+    fn block_search_latest(
+        &self,
+        key: &[u8],
+        now_us: i64,
+        sst_id: u32,
+        block_idx: u32,
+    ) -> Option<Record> {
+        let reader = match Engine::get_reader(&self.readers, &self.config, sst_id) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    "SST latest lookup: cannot open reader for sst {}: {}",
+                    sst_id,
+                    e
+                );
+                return None;
+            }
+        };
+
+        let records = match reader.read_block_decompress(block_idx) {
+            Ok((_header, recs)) => recs,
+            Err(e) => {
+                tracing::error!(
+                    "SST latest lookup: block decompress failed sst={} block={}: {}",
+                    sst_id,
+                    block_idx,
+                    e
+                );
+                return None;
+            }
+        };
+
+        // Find the record with matching key and max (ts, seq).
+        let mut best: Option<&InternalRecord> = None;
+        for rec in &records {
+            if rec.key.as_slice() == key
+                && rec.expire_at > now_us
+                && rec.op != Op::Delete
+            {
+                match best {
+                    None => best = Some(rec),
+                    Some(b) => {
+                        if rec.ts > b.ts || (rec.ts == b.ts && rec.seq > b.seq) {
+                            best = Some(rec);
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|r| Record {
+            key: key.to_vec(),
+            ts: r.ts,
+            expire_at: r.expire_at,
+            value: r.value.clone(),
+        })
     }
 
     // ------------------------------------------------------------------
@@ -2014,6 +2114,30 @@ mod tests {
     }
 
     #[test]
+    fn test_get_latest_from_sst_only() {
+        // Data lives entirely in SST (no memtable data for the key).
+        let dir = TempDir::new().unwrap();
+        let config = make_config(dir.path());
+        let engine = Engine::open(config).unwrap();
+
+        engine
+            .write_batch(&[
+                make_record("sst_latest", 100),
+                make_record("sst_latest", 500),
+                make_record("sst_latest", 300),
+            ])
+            .unwrap();
+        engine.flush().unwrap();
+
+        // Now "sst_latest" records are only in SST, not in memtable.
+        let latest = engine.get_latest("sst_latest").unwrap();
+        assert!(latest.is_some());
+        assert_eq!(latest.unwrap().ts, 500);
+
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
     fn test_scan_lazy_does_not_materialize_all() {
         let dir = TempDir::new().unwrap();
         let config = make_config(dir.path());
@@ -2198,15 +2322,15 @@ mod tests {
         engine.shutdown().unwrap();
 
         // Tamper: rewrite the MANIFEST so every bloom has hash_version=0,
-        // simulating an upgrade from the legacy ahash-based bloom.
+        // simulating an upgrade from a legacy hasher.
         let manifest_path = dir.path().join("MANIFEST");
         let original = std::fs::read_to_string(&manifest_path).unwrap();
-        let tampered = original.replace("\"hash_version\":1", "\"hash_version\":0");
-        // Some blooms may have been written without hash_version (the field
-        // was missing in legacy manifests). The replacement above is a no-op
-        // if there's nothing to replace, which is fine.
+        let tampered = original.replace(
+            &format!("\"hash_version\":{}", crate::bloom::CURRENT_HASH_VERSION),
+            "\"hash_version\":0",
+        );
         if tampered != original {
-            std::fs::write(&manifest_path, tampered).unwrap();
+            std::fs::write(&manifest_path, &tampered).unwrap();
         }
 
         // Reopen — Engine::open should detect stale blooms, scan the SST,

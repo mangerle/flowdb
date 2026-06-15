@@ -3,7 +3,7 @@ use crate::cache::BlockCache;
 use crate::error::Result;
 use crate::manifest::{Manifest, ManifestEntry, SstInfo};
 use crate::record::{InternalRecord, Op};
-use crate::sstable::{SstReader, SstWriter};
+use crate::sstable::{SstReader, SstStreamWriter};
 use crate::stats::StatsCounters;
 use std::sync::Arc;
 
@@ -107,14 +107,41 @@ impl CompactionRunner {
             }
         }
 
-        let mut merged_records = Vec::new();
+        // Pre-allocate bloom filter.  Over-estimate is harmless (lowers FPR).
+        let estimated_records: usize = candidates
+            .iter()
+            .filter_map(|id| {
+                let mf = self.manifest.lock();
+                mf.state().sstables.get(id).map(|info| info.records as usize)
+            })
+            .sum();
+
+        let new_sst_id;
+        {
+            let mf = self.manifest.lock();
+            new_sst_id = mf.next_sst_id();
+        }
+
+        let sst_path = sst_dir.join(format!("{:09}.sst", new_sst_id));
+        let tmp_path = sst_path.with_extension("sst.tmp");
+        let mut writer = SstStreamWriter::new(
+            &tmp_path,
+            self.block_size,
+            self.zstd_level,
+            estimated_records,
+            self.bloom_bits_per_key,
+            true,
+        )?;
+
         let mut last_dedup: Option<(Vec<u8>, i64)> = None;
+        let mut records_written: u64 = 0;
 
         while let Some(entry) = heap.pop() {
             let dedup_key = (entry.record.key.clone(), entry.record.ts);
             if last_dedup.as_ref() != Some(&dedup_key) {
                 if entry.record.op != Op::Delete && entry.record.op != Op::DeleteRange {
-                    merged_records.push(entry.record.clone());
+                    writer.write_record(&entry.record)?;
+                    records_written += 1;
                 }
                 last_dedup = Some(dedup_key);
             }
@@ -127,7 +154,7 @@ impl CompactionRunner {
             }
         }
 
-        if merged_records.is_empty() {
+        if records_written == 0 {
             for sst_id in &candidates {
                 self.cache.invalidate_sst(*sst_id);
                 let path = sst_dir.join(format!("{:09}.sst", sst_id));
@@ -141,40 +168,17 @@ impl CompactionRunner {
             return Ok(true);
         }
 
-        let new_sst_id;
-        {
-            let mf = self.manifest.lock();
-            new_sst_id = mf.next_sst_id();
-        }
-
-        let sst_path = sst_dir.join(format!("{:09}.sst", new_sst_id));
-        let tmp_path = sst_path.with_extension("sst.tmp");
-        let (sst_bytes, block_infos, bloom) = SstWriter::write(
-            &tmp_path,
-            &merged_records,
-            self.block_size,
-            self.zstd_level,
-            self.bloom_bits_per_key,
-            true,
-        )?;
+        let (sst_bytes, block_infos, bloom) = writer.finish()?;
         std::fs::rename(&tmp_path, &sst_path)?;
 
-        let min_ts = merged_records.iter().map(|r| r.ts).min().unwrap_or(0);
-        let max_ts = merged_records.iter().map(|r| r.ts).max().unwrap_or(0);
-        let min_expire = merged_records
-            .iter()
-            .map(|r| r.expire_at)
-            .min()
-            .unwrap_or(0);
-        let max_expire = merged_records
-            .iter()
-            .map(|r| r.expire_at)
-            .max()
-            .unwrap_or(0);
+        let min_ts = block_infos.iter().map(|b| b.min_ts).min().unwrap_or(0);
+        let max_ts = block_infos.iter().map(|b| b.max_ts).max().unwrap_or(0);
+        let min_expire = block_infos.iter().map(|b| b.min_expire).min().unwrap_or(0);
+        let max_expire = block_infos.iter().map(|b| b.max_expire).max().unwrap_or(0);
 
         let new_info = SstInfo {
             id: new_sst_id,
-            records: merged_records.len() as u64,
+            records: records_written,
             bytes: sst_bytes,
             min_ts,
             max_ts,

@@ -272,6 +272,136 @@ impl SstWriter {
     }
 }
 
+/// Streaming SST writer — writes records one-at-a-time without
+/// materialising the full record set in memory.
+///
+/// Construction takes an *estimated* unique-key count for the bloom
+/// filter pre-allocation. An over-estimate is harmless (lower FPR).
+/// Records are buffered until a block is full, then compressed and
+/// appended to the file.  Call [`SstStreamWriter::finish`] to flush
+/// the last block, sync, and obtain metadata.
+pub(crate) struct SstStreamWriter {
+    file: std::fs::File,
+    block_size: usize,
+    zstd_level: i32,
+    use_zstd: bool,
+    bloom: BloomFilter,
+    current_block: Vec<InternalRecord>,
+    block_infos: Vec<BlockInfo>,
+    total_bytes: u64,
+    flushed: bool,
+}
+
+impl SstStreamWriter {
+    pub fn new(
+        path: &std::path::Path,
+        block_size: usize,
+        zstd_level: i32,
+        estimated_keys: usize,
+        bloom_bits_per_key: usize,
+        use_zstd: bool,
+    ) -> Result<Self> {
+        let file = std::fs::File::create(path)?;
+        let bloom = BloomFilter::with_bits_per_key(estimated_keys.max(1), bloom_bits_per_key);
+        Ok(Self {
+            file,
+            block_size,
+            zstd_level,
+            use_zstd,
+            bloom,
+            current_block: Vec::with_capacity(block_size),
+            block_infos: Vec::new(),
+            total_bytes: 0,
+            flushed: false,
+        })
+    }
+
+    /// Append a single record.  Automatically flushes the current block
+    /// when it reaches `block_size` records.
+    pub fn write_record(&mut self, rec: &InternalRecord) -> Result<()> {
+        self.bloom.insert(&rec.key);
+        self.current_block.push(rec.clone());
+
+        if self.current_block.len() >= self.block_size {
+            self.flush_block()?;
+        }
+        Ok(())
+    }
+
+    /// Flush the final block (if any), sync the file, and return the
+    /// accumulated metadata.
+    pub fn finish(mut self) -> Result<(u64, Vec<BlockInfo>, BloomFilter)> {
+        if !self.current_block.is_empty() {
+            self.flush_block()?;
+        }
+        self.file.flush()?;
+        self.file.sync_all()?;
+        self.flushed = true;
+        Ok((self.total_bytes, self.block_infos.clone(), self.bloom.clone()))
+    }
+
+    fn flush_block(&mut self) -> Result<()> {
+        if self.current_block.is_empty() {
+            return Ok(());
+        }
+
+        let raw_data = encode_records(&self.current_block);
+        let data_len = raw_data.len() as u32;
+        let compressed = if self.use_zstd {
+            zstd::bulk::compress(&raw_data, self.zstd_level)?
+        } else {
+            lz4_flex::block::compress(&raw_data)
+        };
+        let compressed_len = compressed.len() as u32;
+
+        let min_ts = self.current_block.iter().map(|r| r.ts).min().unwrap_or(0);
+        let max_ts = self.current_block.iter().map(|r| r.ts).max().unwrap_or(0);
+        let min_expire = self.current_block.iter().map(|r| r.expire_at).min().unwrap_or(0);
+        let max_expire = self.current_block.iter().map(|r| r.expire_at).max().unwrap_or(0);
+
+        let first_key = self.current_block.first().map(|r| r.key.clone()).unwrap_or_default();
+        let last_key = self.current_block.last().map(|r| r.key.clone()).unwrap_or_default();
+
+        let header = BlockHeader {
+            num_records: self.current_block.len() as u32,
+            min_ts,
+            max_ts,
+            min_expire,
+            max_expire,
+            data_len,
+            compressed_len,
+            is_zstd: self.use_zstd,
+        };
+
+        let header_bytes = header.to_bytes();
+        self.file.write_all(&header_bytes)?;
+        self.file.write_all(&compressed)?;
+        self.total_bytes += HEADER_SIZE as u64 + compressed.len() as u64;
+
+        self.block_infos.push(BlockInfo {
+            block_idx: self.block_infos.len() as u32,
+            min_key: first_key,
+            max_key: last_key,
+            min_ts,
+            max_ts,
+            min_expire,
+            max_expire,
+        });
+
+        self.current_block.clear();
+        Ok(())
+    }
+}
+
+impl Drop for SstStreamWriter {
+    fn drop(&mut self) {
+        if !self.flushed && !self.current_block.is_empty() {
+            let _ = self.flush_block();
+            let _ = self.file.sync_all();
+        }
+    }
+}
+
 pub(crate) struct SstReader {
     _file: std::fs::File,
     mmap: memmap2::Mmap,
@@ -530,5 +660,115 @@ mod tests {
 
         let raw_size: usize = records.iter().map(|r| r.estimated_size()).sum();
         assert!(bytes < raw_size as u64);
+    }
+
+    #[test]
+    fn test_sst_stream_writer_empty() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("empty.sst");
+        let mut writer =
+            SstStreamWriter::new(&path, 10, 3, 0, 10, false).unwrap();
+        let (bytes, blocks, _bloom) = writer.finish().unwrap();
+        assert_eq!(bytes, 0, "empty writer produces zero bytes");
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn test_sst_stream_writer_single_block() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("single.sst");
+        let records = make_records(5);
+        let mut writer =
+            SstStreamWriter::new(&path, 100, 3, 5, 10, false).unwrap();
+        for rec in &records {
+            writer.write_record(rec).unwrap();
+        }
+        let (bytes, blocks, bloom) = writer.finish().unwrap();
+        assert!(bytes > 0, "should have written data");
+        assert_eq!(blocks.len(), 1, "all records → single block");
+
+        // Verify the SST can be read back.
+        let reader = SstReader::open(&path, 1, blocks.len()).unwrap();
+        assert_eq!(reader.block_count(), 1);
+        let block = reader.read_block(0, None).unwrap();
+        assert_eq!(block.records.len(), 5);
+        assert_eq!(block.records[0].key, b"key_0000");
+        // The bloom must recognise the inserted keys.
+        for rec in &records {
+            assert!(bloom.may_contain(&rec.key), "bloom must contain {}", String::from_utf8_lossy(&rec.key));
+        }
+    }
+
+    #[test]
+    fn test_sst_stream_writer_multi_block() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("multi.sst");
+        let records = make_records(25);
+        // block_size = 10 → 3 blocks (10 + 10 + 5)
+        let mut writer =
+            SstStreamWriter::new(&path, 10, 3, 25, 10, false).unwrap();
+        for rec in &records {
+            writer.write_record(rec).unwrap();
+        }
+        let (bytes, blocks, bloom) = writer.finish().unwrap();
+        assert!(bytes > 0);
+        assert_eq!(blocks.len(), 3);
+
+        // Verify full read-back.
+        let reader = SstReader::open(&path, 1, blocks.len()).unwrap();
+        let mut all_records = Vec::new();
+        for i in 0..reader.block_count() {
+            let block = reader.read_block(i, None).unwrap();
+            all_records.extend(block.records);
+        }
+        assert_eq!(all_records.len(), 25);
+        for (i, rec) in all_records.iter().enumerate() {
+            assert_eq!(rec.key, format!("key_{:04}", i).into_bytes());
+        }
+        // Bloom sanity.
+        for rec in &records {
+            assert!(bloom.may_contain(&rec.key));
+        }
+    }
+
+    #[test]
+    fn test_sst_stream_writer_roundtrip_via_reader() {
+        // Write with stream writer, read with SstReader → must match
+        // the same records written via the batch SstWriter.
+        let dir = TempDir::new().unwrap();
+        let s_path = dir.path().join("stream.sst");
+        let b_path = dir.path().join("batch.sst");
+
+        let records = make_records(50);
+        // Stream write
+        let mut sw = SstStreamWriter::new(&s_path, 10, 3, 50, 10, false).unwrap();
+        for rec in &records {
+            sw.write_record(rec).unwrap();
+        }
+        let (_, s_blocks, _) = sw.finish().unwrap();
+        // Batch write
+        let (_, b_blocks, _) = SstWriter::write(&b_path, &records, 10, 3, 10, false).unwrap();
+
+        assert_eq!(s_blocks.len(), b_blocks.len());
+
+        // Both files must produce the same records.
+        let s_reader = SstReader::open(&s_path, 1, s_blocks.len()).unwrap();
+        let b_reader = SstReader::open(&b_path, 1, b_blocks.len()).unwrap();
+
+        for idx in 0..s_reader.block_count() {
+            let s_block = s_reader.read_block(idx, None).unwrap();
+            let b_block = b_reader.read_block(idx, None).unwrap();
+            assert_eq!(
+                s_block.records.len(),
+                b_block.records.len(),
+                "block {} record count mismatch",
+                idx
+            );
+            for (s_rec, b_rec) in s_block.records.iter().zip(b_block.records.iter()) {
+                assert_eq!(s_rec.key, b_rec.key);
+                assert_eq!(s_rec.ts, b_rec.ts);
+                assert_eq!(s_rec.value, b_rec.value);
+            }
+        }
     }
 }

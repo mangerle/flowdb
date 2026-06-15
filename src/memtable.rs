@@ -1,20 +1,19 @@
-use crate::record::InternalRecord;
+use crate::record::{InternalRecord, Op};
 use parking_lot::RwLock;
+use std::collections::HashMap;
 
 /// A single memtable backed by a `Vec<InternalRecord>`.
 ///
-/// The active memtable uses an **unsorted Vec** for O(1) writes (no key
-/// clone, no BTreeMap traversal). On freeze, the Vec is sorted in-place
-/// by `(key, ts, seq)` to support efficient range queries and SST flush.
+/// The active memtable uses an **unsorted Vec** for O(1) writes and a
+/// side `HashMap` by (key, ts) for O(1) point lookups. Range/prefix
+/// queries still do a linear scan of the Vec — acceptable because the
+/// active table is typically small and flushed quickly.
 ///
-/// Write path:  `insert` is O(1) — just a Vec push.
-/// Read path:   `get` / `query_*` are O(n) linear scans on the active
-///              table. This is acceptable because reads typically hit
-///              SSTables (via bloom filter + block index), and the active
-///              table is flushed quickly.
-/// Freeze path: `sort()` is O(n log n) — called once per flush cycle.
+/// On freeze the Vec is sorted in-place (the side index is invalidated),
+/// and subsequent reads on the frozen table use binary search.
 pub(crate) struct MemTable {
     records: Vec<InternalRecord>,
+    point_index: HashMap<(Vec<u8>, i64), usize>,
     bytes: usize,
 }
 
@@ -22,22 +21,46 @@ impl MemTable {
     pub fn new() -> Self {
         Self {
             records: Vec::new(),
+            point_index: HashMap::new(),
             bytes: 0,
         }
     }
 
     pub fn insert(&mut self, rec: InternalRecord) {
         self.bytes += rec.estimated_size();
+        self.point_index
+            .insert((rec.key.clone(), rec.ts), self.records.len());
         self.records.push(rec);
     }
 
     /// Get the record with the highest seq for a given (key, ts).
-    /// Uses max_by_key so this works regardless of internal sort order.
+    /// Uses the side index for O(1) lookup in the active table.
+    /// Falls back to a linear scan when the index misses (e.g. after
+    /// sorting, before freeze).
     pub fn get(&self, key: &[u8], ts: i64) -> Option<&InternalRecord> {
+        // Fast path: point index lookup
+        if let Some(&idx) = self.point_index.get(&(key.to_vec(), ts)) {
+            return Some(&self.records[idx]);
+        }
+        // Slow path: linear scan (covers frozen or unindexed state)
         self.records
             .iter()
             .filter(|r| r.key.as_slice() == key && r.ts == ts)
             .max_by_key(|r| r.seq)
+    }
+
+    /// Find the latest (highest ts, highest seq) non-deleted record for a key.
+    /// O(n) — suitable for the small active memtable.
+    pub fn get_latest(&self, key: &[u8], now_us: i64) -> Option<&InternalRecord> {
+        self.records
+            .iter()
+            .filter(|r| {
+                r.key.as_slice() == key
+                    && r.expire_at >= now_us
+                    && r.op != Op::Delete
+                    && r.op != Op::DeleteRange
+            })
+            .max_by_key(|r| (r.ts, r.seq))
     }
 
     pub fn query_prefix(&self, key: &[u8], now_us: i64) -> Vec<&InternalRecord> {
@@ -126,7 +149,9 @@ impl MemTable {
     }
 
     /// Sort records in-place by (key, ts) with highest seq first for dedup.
-    /// Called during freeze.
+    /// Called during freeze. Invalidates the point index — subsequent calls
+    /// to `get()` fall back to the slow linear-scan path, which is acceptable
+    /// because the table is about to be flushed to an SST.
     pub fn sort(&mut self) {
         self.records.sort_by(|a, b| {
             a.key
@@ -134,6 +159,7 @@ impl MemTable {
                 .then(a.ts.cmp(&b.ts))
                 .then(b.seq.cmp(&a.seq))
         });
+        self.point_index.clear();
     }
 
     /// Iterate over records in sorted order (call `sort()` first).
@@ -383,6 +409,30 @@ impl MemTables {
                 }
         }
         None
+    }
+
+    /// Find the latest (highest ts, highest seq) non-expired record for a key.
+    pub fn get_latest(&self, key: &[u8], now_us: i64) -> Option<InternalRecord> {
+        let mut best: Option<InternalRecord> = None;
+        {
+            let active = self.active.read();
+            if let Some(r) = active.get_latest(key, now_us) {
+                best = Some(r.clone());
+            }
+        }
+        {
+            let frozen = self.frozen.read();
+            for mt in frozen.iter() {
+                if let Some(r) = mt.get_latest(key, now_us)
+                    && (best.is_none()
+                        || r.ts > best.as_ref().unwrap().ts
+                        || (r.ts == best.as_ref().unwrap().ts && r.seq > best.as_ref().unwrap().seq))
+                {
+                    best = Some(r.clone());
+                }
+            }
+        }
+        best
     }
 }
 
@@ -686,6 +736,62 @@ mod tests {
     }
 
     #[test]
+    fn test_memtable_get_latest_returns_highest_ts() {
+        let mut mt = MemTable::new();
+        let mut rec1 = make_rec("x", 100, 1);
+        rec1.value = b"old".to_vec();
+        let mut rec2 = make_rec("x", 300, 2);
+        rec2.value = b"new".to_vec();
+        let mut rec3 = make_rec("x", 200, 3);
+        rec3.value = b"mid".to_vec();
+        mt.insert(rec1);
+        mt.insert(rec2);
+        mt.insert(rec3);
+
+        let latest = mt.get_latest(b"x", i64::MAX).unwrap();
+        assert_eq!(latest.ts, 300, "should return highest ts=300");
+        assert_eq!(latest.value, b"new");
+    }
+
+    #[test]
+    fn test_memtable_get_latest_skips_expired() {
+        let mut mt = MemTable::new();
+        let mut live = make_rec("y", 100, 1);
+        live.expire_at = i64::MAX; // never expires
+        let mut expired = make_rec("y", 200, 2);
+        expired.expire_at = 50; // expired
+        mt.insert(live);
+        mt.insert(expired);
+
+        let latest = mt.get_latest(b"y", 100);
+        assert!(latest.is_some(), "should still find the non-expired record");
+        assert_eq!(latest.unwrap().ts, 100);
+    }
+
+    #[test]
+    fn test_memtable_get_latest_nonexistent() {
+        let mt = MemTable::new();
+        assert!(mt.get_latest(b"no_such_key", i64::MAX).is_none());
+    }
+
+    #[test]
+    fn test_memtable_get_via_point_index_after_multi_insert() {
+        // Confirm the point index returns the highest-seq record
+        // when the same (key, ts) is inserted twice.
+        let mut mt = MemTable::new();
+        let mut v1 = make_rec("dup", 42, 5);
+        v1.value = b"first".to_vec();
+        let mut v2 = make_rec("dup", 42, 10);
+        v2.value = b"second".to_vec();
+        mt.insert(v1);
+        mt.insert(v2);
+
+        let result = mt.get(b"dup", 42).unwrap();
+        assert_eq!(result.seq, 10, "point index must return highest seq");
+        assert_eq!(result.value, b"second");
+    }
+
+    #[test]
     fn test_memtables_get_multi_version_across_active_and_frozen() {
         // Put in frozen table (seq=1), then a newer Put in active (seq=2).
         // MemTables::get should prefer active (higher seq).
@@ -705,6 +811,26 @@ mod tests {
     }
 
     #[test]
+    fn test_backpressure_drains_when_active_empty() {
+        // Regression: when frozen is at max_frozen and active is empty,
+        // do_flush must not livelock.  This simulates the drain logic:
+        // when freeze() fails (active empty) but frozen has entries,
+        // pop_frozen() should relieve backpressure.
+        let mts = MemTables::new(1, 1024);
+        // Fill active and freeze.
+        mts.insert(make_rec("k", 100, 1));
+        assert!(mts.freeze(), "first freeze must succeed");
+        // Active is now empty, frozen has 1 entry.
+        assert!(mts.frozen_backpressure(), "1 >= 1 → backpressure");
+        // Pop should succeed, relieving backpressure.
+        let popped = mts.pop_frozen();
+        assert!(popped.is_some(), "must pop frozen entry");
+        assert!(!mts.frozen_backpressure(), "backpressure relieved");
+        // Second pop must return None (nothing left).
+        assert!(mts.pop_frozen().is_none());
+    }
+
+    #[test]
     fn test_memtables_get_delete_in_active_overrides_put_in_frozen() {
         // Put in frozen table, Delete in active → must see deleted.
         let mts = MemTables::new(2, 1024);
@@ -718,5 +844,25 @@ mod tests {
             result.is_none() || result.unwrap().op != crate::record::Op::Put,
             "delete in active must override put in frozen"
         );
+    }
+
+    #[test]
+    fn test_memtables_get_latest_prefers_active_over_frozen() {
+        let mts = MemTables::new(2, 1024);
+        // Frozen: (x, 100, seq=1)
+        mts.insert(make_rec("x", 100, 1));
+        mts.freeze();
+        // Active: (x, 200, seq=2) — newer ts in active
+        mts.insert(make_rec("x", 200, 2));
+
+        let latest = mts.get_latest(b"x", i64::MAX).unwrap();
+        assert_eq!(latest.ts, 200, "active record with higher ts wins");
+        assert_eq!(latest.seq, 2);
+    }
+
+    #[test]
+    fn test_memtables_get_latest_nonexistent() {
+        let mts = MemTables::new(2, 1024);
+        assert!(mts.get_latest(b"no_such_key", i64::MAX).is_none());
     }
 }

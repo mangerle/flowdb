@@ -2,6 +2,7 @@ use crate::bloom::BloomFilter;
 use crate::manifest::BlockInfo;
 use crate::record::KeyFilter;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub(crate) struct BlockMeta {
@@ -46,11 +47,11 @@ impl BlockMeta {
 }
 
 pub(crate) struct BlockMetaIndex {
-    by_key: BTreeMap<Vec<u8>, Vec<BlockMeta>>,
-    by_time: BTreeMap<i64, Vec<BlockMeta>>,
+    by_key: BTreeMap<Vec<u8>, Vec<Arc<BlockMeta>>>,
+    by_time: BTreeMap<i64, Vec<Arc<BlockMeta>>>,
     time_bucket_us: i64,
     blooms: HashMap<u32, BloomFilter>,
-    sst_blocks: BTreeMap<u32, Vec<BlockMeta>>,
+    sst_blocks: BTreeMap<u32, Vec<Arc<BlockMeta>>>,
 }
 
 impl BlockMetaIndex {
@@ -66,7 +67,7 @@ impl BlockMetaIndex {
 
     pub fn add_sst(&mut self, sst_id: u32, blocks: &[BlockInfo]) {
         for bi in blocks {
-            let meta = BlockMeta::from_block_info(sst_id, bi);
+            let meta = Arc::new(BlockMeta::from_block_info(sst_id, bi));
             let key = meta.min_key.clone();
             self.by_key.entry(key).or_default().push(meta.clone());
 
@@ -74,9 +75,9 @@ impl BlockMetaIndex {
             self.by_time.entry(bucket).or_default().push(meta);
         }
 
-        let sorted: Vec<BlockMeta> = blocks
+        let sorted: Vec<Arc<BlockMeta>> = blocks
             .iter()
-            .map(|bi| BlockMeta::from_block_info(sst_id, bi))
+            .map(|bi| Arc::new(BlockMeta::from_block_info(sst_id, bi)))
             .collect();
         self.sst_blocks.insert(sst_id, sorted);
     }
@@ -145,12 +146,12 @@ impl BlockMetaIndex {
         None
     }
 
-    fn binary_search_block<'a>(blocks: &'a [BlockMeta], key: &[u8]) -> Option<&'a BlockMeta> {
+    fn binary_search_block<'a>(blocks: &'a [Arc<BlockMeta>], key: &[u8]) -> Option<&'a BlockMeta> {
         let mut lo = 0usize;
         let mut hi = blocks.len();
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let b = &blocks[mid];
+            let b = &*blocks[mid];
             if b.max_key.as_slice() < key {
                 lo = mid + 1;
             } else if b.min_key.as_slice() > key {
@@ -163,7 +164,7 @@ impl BlockMetaIndex {
             && blocks[lo].min_key.as_slice() <= key
             && blocks[lo].max_key.as_slice() >= key
         {
-            return Some(&blocks[lo]);
+            return Some(&*blocks[lo]);
         }
         None
     }
@@ -195,7 +196,7 @@ impl BlockMetaIndex {
                     .range(..prefix_end)
                     .flat_map(|(_, metas)| metas.iter())
                     .filter(|m| !m.is_expired(now_us) && m.overlaps_key_prefix(key.as_slice()))
-                    .cloned()
+                    .map(|m| (**m).clone())
                     .collect()
             }
             KeyFilter::Range { start, end } => {
@@ -207,7 +208,7 @@ impl BlockMetaIndex {
                         !m.is_expired(now_us)
                             && m.overlaps_key_range(start.as_slice(), end.as_slice())
                     })
-                    .cloned()
+                    .map(|m| (**m).clone())
                     .collect()
             }
             KeyFilter::All => self
@@ -215,7 +216,7 @@ impl BlockMetaIndex {
                 .values()
                 .flat_map(|metas| metas.iter())
                 .filter(|m| !m.is_expired(now_us))
-                .cloned()
+                .map(|m| (**m).clone())
                 .collect(),
         }
     }
@@ -239,6 +240,8 @@ impl BlockMetaIndex {
     pub fn total_entries(&self) -> usize {
         self.by_key.values().map(|v| v.len()).sum()
     }
+
+
 
     pub fn bucket_count(&self) -> usize {
         self.by_time.len()

@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::hash::Hasher;
 
 /// Current hasher version. Persisted bloom filters whose `hash_version` differs
 /// from this constant were built with a different hash function and MUST be
@@ -11,7 +10,9 @@ use std::hash::Hasher;
 ///   unsafe across recompiles). Used by flowdb <= 0.1.6.
 /// * `1` — `std::hash::DefaultHasher` (SipHash-1-3) with a fixed seed baked
 ///   into the binary. Stable across restarts AND recompiles.
-pub(crate) const CURRENT_HASH_VERSION: u8 = 1;
+/// * `2` — Inline FxHash (rotary-multiply) with fixed seeds. ~10× faster
+///   than SipHash-1-3 while maintaining stable outputs across restarts.
+pub(crate) const CURRENT_HASH_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct BloomFilter {
@@ -67,32 +68,19 @@ impl BloomFilter {
         self.hash_version = CURRENT_HASH_VERSION;
     }
 
-    /// Double-hashing with a fixed seed. We use `std::hash::DefaultHasher`
-    /// (SipHash-1-3) seeded with compile-time constants. Unlike
-    /// `ahash::AHasher::default()`, the seed does NOT depend on build-time
-    /// randomness, so persisted filters stay valid across recompiles and
-    /// process restarts.
+    /// Fast double-hashing with fixed seeds. Uses an inline FxHash (rotary-
+    /// multiply) that is ~10× faster than `std::hash::DefaultHasher` (SipHash).
+    /// Seeds are compile-time constants so outputs are stable across restarts
+    /// and recompiles.
     ///
-    /// Two independent hashes are derived by re-seeding the hasher with a
-    /// distinguishing prefix byte, then combined via the standard
-    /// `h1 + i * h2` double-hashing scheme.
+    /// Two independent hashes are derived via different seeds, then combined
+    /// via the standard `h1 + i * h2` double-hashing scheme.
     fn hash_pair(data: &[u8]) -> (u64, u64) {
-        const SEED_K0: u64 = 0x5365_7244_424c_4f4f;
-        const SEED_K1: u64 = 0x5744_425f_464c_4f57;
+        const SEED_A: u64 = 0x5365_7244_424c_4f4f;
+        const SEED_B: u64 = 0x5744_425f_464c_4f57;
 
-        let mut h1 = std::hash::DefaultHasher::new();
-        h1.write_u64(SEED_K0);
-        h1.write_u64(SEED_K1);
-        h1.write(data);
-        let hash1 = h1.finish();
-
-        let mut h2 = std::hash::DefaultHasher::new();
-        h2.write_u64(!SEED_K0);
-        h2.write_u64(!SEED_K1);
-        h2.write_u8(0xFF);
-        h2.write(data);
-        let hash2 = h2.finish();
-
+        let hash1 = fxhash64(data, SEED_A ^ SEED_B);
+        let hash2 = fxhash64(data, !SEED_A ^ SEED_B);
         (hash1, hash2)
     }
 
@@ -131,6 +119,27 @@ impl BloomFilter {
         }
         true
     }
+}
+
+/// Inline FxHash — rotary-multiply with fixed seeds.
+/// ~10× faster than SipHash-1-3 and stable across restarts.
+fn fxhash64(data: &[u8], seed: u64) -> u64 {
+    const MULT: u64 = 0x517c_c1b7_2722_0a95;
+    let mut hash = seed;
+    let mut i = 0;
+    while i + 8 <= data.len() {
+        let chunk: [u8; 8] = data[i..i + 8].try_into().unwrap();
+        hash = hash.rotate_left(5) ^ u64::from_le_bytes(chunk);
+        hash = hash.wrapping_mul(MULT);
+        i += 8;
+    }
+    if i < data.len() {
+        let mut buf = [0u8; 8];
+        buf[..data.len() - i].copy_from_slice(&data[i..]);
+        hash = hash.rotate_left(5) ^ u64::from_le_bytes(buf);
+        hash = hash.wrapping_mul(MULT);
+    }
+    hash
 }
 
 #[cfg(test)]

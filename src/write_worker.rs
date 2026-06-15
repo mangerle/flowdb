@@ -87,12 +87,16 @@ impl WriteWorker {
     }
 
     pub fn do_flush(&mut self) -> Result<()> {
-        let did_freeze = self.memtables.freeze();
-        if !did_freeze {
-            return Ok(());
-        }
+        let _did_freeze = self.memtables.freeze();
 
-        let frozen = match self.memtables.pop_frozen() {
+        // Pop the oldest frozen memtable and flush it to SST.
+        // When freeze() succeeds the active was just moved to frozen, so
+        // we flush the oldest entry.  When freeze() fails (active empty)
+        // we still pop one — this relieves backpressure and prevents a
+        // livelock when frozen_backpressure is true with an empty active.
+        let frozen = self.memtables.pop_frozen();
+
+        let frozen = match frozen {
             Some(f) => f,
             None => return Ok(()),
         };
