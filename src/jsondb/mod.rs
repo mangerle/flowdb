@@ -61,6 +61,57 @@ pub enum TransactionMode {
 /// tx.put("users", json!({"id": "u2", "email": "c@d.com"})).unwrap();
 /// tx.commit().unwrap();
 /// ```
+
+// ── KeyArg / Document traits ──────────────────────────────────────
+
+/// Trait for types that can be used as a primary key argument.
+///
+/// Implemented for `&str`, `String`, `i64`, `u64`, `f64`, `Value`, and `&Value`.
+pub trait KeyArg {
+    fn into_value(self) -> Value;
+}
+
+impl KeyArg for &str {
+    fn into_value(self) -> Value {
+        Value::String(self.to_string())
+    }
+}
+impl KeyArg for String {
+    fn into_value(self) -> Value {
+        Value::String(self)
+    }
+}
+impl KeyArg for i64 {
+    fn into_value(self) -> Value {
+        Value::Number(self.into())
+    }
+}
+impl KeyArg for i32 {
+    fn into_value(self) -> Value {
+        Value::Number((self as i64).into())
+    }
+}
+impl KeyArg for u64 {
+    fn into_value(self) -> Value {
+        Value::Number(self.into())
+    }
+}
+impl KeyArg for u32 {
+    fn into_value(self) -> Value {
+        Value::Number((self as u64).into())
+    }
+}
+impl KeyArg for Value {
+    fn into_value(self) -> Value {
+        self
+    }
+}
+impl KeyArg for &Value {
+    fn into_value(self) -> Value {
+        self.clone()
+    }
+}
+
 pub struct JsonDB {
     engine: Engine,
     schema: Schema,
@@ -549,6 +600,46 @@ impl JsonDB {
     /// Create a [`QueryBuilder`] for the given store.
     pub fn query<'a>(&'a self, store: &'a str) -> QueryBuilder<'a> {
         QueryBuilder::new(self, store)
+    }
+
+    // ── generic document API (struct-based) ──────────────────────
+
+    /// Insert or update a document of any `Serialize` type.
+    ///
+    /// The type **must** have a field matching the store's `key_path`.
+    /// Returns the extracted primary key value.
+    ///
+    /// ```ignore
+    /// db.put_doc("users", &User { id: "u1".into(), name: "Alice".into() })?;
+    /// ```
+    pub fn put_doc<T: serde::Serialize>(&self, store: &str, doc: &T) -> Result<Value> {
+        let json = serde_json::to_value(doc).map_err(FlowError::from)?;
+        self.put(store, json)
+    }
+
+    /// Retrieve a document by primary key, deserialized to `T`.
+    ///
+    /// ```ignore
+    /// let user: User = db.get_doc("users", "u1")?.unwrap();
+    /// ```
+    pub fn get_doc<T: serde::de::DeserializeOwned>(
+        &self,
+        store: &str,
+        key: impl KeyArg,
+    ) -> Result<Option<T>> {
+        let val = self.get(store, &key.into_value())?;
+        match val {
+            Some(v) => {
+                let t: T = serde_json::from_value(v).map_err(FlowError::from)?;
+                Ok(Some(t))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Delete a document by primary key, accepting any `KeyArg` type.
+    pub fn delete_doc(&self, store: &str, key: impl KeyArg) -> Result<()> {
+        self.delete(store, &key.into_value())
     }
 }
 
@@ -1289,6 +1380,18 @@ impl<'a> QueryBuilder<'a> {
             .collect();
 
         Ok(docs)
+    }
+
+    /// Execute the query and deserialize results to `T`.
+    ///
+    /// ```ignore
+    /// let users: Vec<User> = db.query("users")
+    ///     .where_eq("email", "a@b.com")
+    ///     .collect_doc()?;
+    /// ```
+    pub fn collect_doc<T: serde::de::DeserializeOwned>(self) -> Result<Vec<T>> {
+        let values: Vec<Value> = self.collect()?;
+        values.into_iter().map(|v| serde_json::from_value(v).map_err(FlowError::from)).collect()
     }
 }
 
@@ -3230,5 +3333,117 @@ mod tests {
             .collect()
             .unwrap();
         assert_eq!(docs.len(), 1);
+    }
+
+    // ── generic struct API ────────────────────────────────────────
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct TestUser {
+        id: String,
+        name: String,
+        email: String,
+    }
+
+    #[test]
+    fn test_put_doc_and_get_doc() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        db.create_index("users", "by_email", &["email"], true).unwrap();
+
+        let user = TestUser {
+            id: "u1".into(),
+            name: "Alice".into(),
+            email: "a@b.com".into(),
+        };
+        let key = db.put_doc("users", &user).unwrap();
+        assert_eq!(key, json!("u1"));
+
+        let retrieved: TestUser = db.get_doc("users", "u1").unwrap().unwrap();
+        assert_eq!(retrieved.name, "Alice");
+        assert_eq!(retrieved.email, "a@b.com");
+    }
+
+    #[test]
+    fn test_put_doc_numeric_key() {
+        let (db, _dir) = test_db();
+        db.create_object_store("items", "id").unwrap();
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Item {
+            id: i64,
+            name: String,
+        }
+
+        let item = Item { id: 42, name: "answer".into() };
+        let key = db.put_doc("items", &item).unwrap();
+        assert_eq!(key, json!(42));
+
+        let retrieved: Item = db.get_doc("items", 42).unwrap().unwrap();
+        assert_eq!(retrieved.name, "answer");
+    }
+
+    #[test]
+    fn test_get_doc_not_found() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+
+        let user: Option<TestUser> = db.get_doc("users", "nonexistent").unwrap();
+        assert!(user.is_none());
+    }
+
+    #[test]
+    fn test_delete_doc() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+
+        let user = TestUser {
+            id: "u1".into(),
+            name: "Alice".into(),
+            email: "a@b.com".into(),
+        };
+        db.put_doc("users", &user).unwrap();
+        assert!(db.count("users").unwrap() == 1);
+
+        db.delete_doc("users", "u1").unwrap();
+        assert!(db.count("users").unwrap() == 0);
+    }
+
+    #[test]
+    fn test_collect_doc() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+        db.create_index("users", "by_email", &["email"], true).unwrap();
+
+        db.put_doc("users", &TestUser {
+            id: "u1".into(),
+            name: "Alice".into(),
+            email: "a@b.com".into(),
+        }).unwrap();
+
+        let users: Vec<TestUser> = db.query("users")
+            .where_eq("email", json!("a@b.com"))
+            .collect_doc()
+            .unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].name, "Alice");
+    }
+
+    #[test]
+    fn test_put_doc_in_transaction() {
+        let (db, _dir) = test_db();
+        db.create_object_store("users", "id").unwrap();
+
+        let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+        let user = TestUser {
+            id: "u2".into(),
+            name: "Bob".into(),
+            email: "b@b.com".into(),
+        };
+        let json = serde_json::to_value(&user).unwrap();
+        tx.put("users", json).unwrap();
+        tx.commit().unwrap();
+
+        let retrieved: TestUser = db.get_doc("users", "u2").unwrap().unwrap();
+        assert_eq!(retrieved.name, "Bob");
     }
 }
