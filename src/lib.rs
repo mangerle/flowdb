@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod engine;
 pub mod error;
+pub mod jsondb;
 pub mod record;
 pub mod stats;
 

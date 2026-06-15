@@ -124,10 +124,11 @@ impl MemTable {
         self.bytes
     }
 
-    /// Sort records in-place by (key, ts, seq). Called during freeze.
+    /// Sort records in-place by (key, ts) with highest seq first for dedup.
+    /// Called during freeze.
     pub fn sort(&mut self) {
         self.records
-            .sort_by(|a, b| a.key.cmp(&b.key).then(a.ts.cmp(&b.ts)).then(a.seq.cmp(&b.seq)));
+            .sort_by(|a, b| a.key.cmp(&b.key).then(a.ts.cmp(&b.ts)).then(b.seq.cmp(&a.seq)));
     }
 
     /// Iterate over records in sorted order (call `sort()` first).

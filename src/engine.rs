@@ -865,6 +865,54 @@ impl Engine {
         Ok(latest)
     }
 
+    // ------------------------------------------------------------------
+    // Internal API used by the jsondb module (crate-visible only)
+    // ------------------------------------------------------------------
+
+    /// Point lookup for a byte key at a given `ts`. Used by `jsondb` where
+    /// keys are binary composite keys that may not be valid UTF-8.
+    pub(crate) fn get_bytes(&self, key: &[u8], ts: i64) -> Option<Record> {
+        let now_us = now_micros();
+
+        if let Some(rec) = self.memtables.get(key, ts, now_us) {
+            if rec.op != Op::Delete {
+                return Some(rec.to_record());
+            }
+            return None;
+        }
+
+        let key_bytes = key;
+        let idx = self.index.read();
+        if let Some((sst_id, block_idx)) = idx.single_sst_point(key_bytes, now_us) {
+            drop(idx);
+            return self.block_search(key_bytes, ts, now_us, sst_id, block_idx);
+        }
+
+        let found = idx.query_point_inline(key_bytes, now_us, |meta| {
+            self.block_search(key_bytes, ts, now_us, meta.sst_id, meta.block_idx)
+        });
+        drop(idx);
+        found
+    }
+
+    /// Write a batch of [`InternalRecord`]s (puts, deletes, range-deletes)
+    /// atomically. Sequence numbers are assigned automatically. This is the
+    /// primitive used by the `jsondb` module for atomic multi-key updates
+    /// (document + secondary-index maintenance).
+    pub(crate) fn write_internal(&self, records: Vec<InternalRecord>) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let base = self
+            .seq_counter
+            .fetch_add(records.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        let mut recs = records;
+        for (i, rec) in recs.iter_mut().enumerate() {
+            rec.seq = base + i as u64;
+        }
+        self.do_write(recs)
+    }
+
 }
 
 /// ScanIterator — lazy merging iterator over memtables + SST blocks
@@ -1061,9 +1109,16 @@ impl ScanIterator {
             }
         }
 
-        // 6) Sort memtable results
+        // 6) Sort memtable results - highest seq first for same (key, ts)
+        //    so that deletes/overwrites with higher seq are processed before
+        //    older puts, ensuring correct dedup in the fast-source scan path.
         let mut mem_sorted = mem_results;
-        mem_sorted.sort_by(|a, b| a.key.cmp(&b.key).then(a.ts.cmp(&b.ts)));
+        mem_sorted.sort_by(|a, b| {
+            a.key
+                .cmp(&b.key)
+                .then(a.ts.cmp(&b.ts))
+                .then(b.seq.cmp(&a.seq))
+        });
 
         // 7) Assemble all sources: memtable first (index 0), then SST sources
         let mut sources: Vec<std::iter::Peekable<std::vec::IntoIter<InternalRecord>>> =
@@ -1206,8 +1261,17 @@ impl Iterator for ScanIterator {
                 let src = self.sources.get_mut(idx)?;
                 let rec = src.next()?;
                 if rec.op == Op::Delete || rec.op == Op::DeleteRange {
+                    self.last_dedup = Some((rec.key.clone(), rec.ts));
                     continue;
                 }
+                // Skip duplicates (same key, ts) which can occur when a later
+                // Put overwrites an earlier one or a Delete masks a prior Put.
+                if let Some((ref last_key, last_ts)) = self.last_dedup {
+                    if rec.key == *last_key && rec.ts == last_ts {
+                        continue;
+                    }
+                }
+                self.last_dedup = Some((rec.key.clone(), rec.ts));
                 return Some(Ok(rec.into_record_owned()));
             }
         }

@@ -18,6 +18,8 @@ pub enum FlowError {
     InvalidMagic { expected: u32, actual: u32 },
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("JsonDB: {0}")]
+    JsonDb(String),
     #[error("{0}")]
     Other(String),
 }

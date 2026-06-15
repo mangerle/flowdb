@@ -54,7 +54,7 @@ How we hit 90%+ across the whole crate:
 
 If you add new code, please add corresponding tests and run
 `cargo llvm-cov --summary-only` before committing — the TOTAL line coverage
-must stay at or above 90%.
+must stay at or above 95%.
 
 ## Project Layout
 
@@ -75,6 +75,10 @@ src/
   write_worker.rs     – single-writer worker driving WAL + memtable
   stats.rs            – engine stats + Prometheus exporter
   error.rs            – FlowError / Result
+  jsondb/             – IndexedDB-compatible JSON document layer
+    mod.rs            – JsonDB, Transaction, full API
+    encoding.rs       – key/value encoding, JSON field extraction
+    schema.rs         – StoreDef / IndexDef / schema persistence
   bin/
     flowdb-stress.rs  – `flowdb-stress` benchmarking binary
 tests/

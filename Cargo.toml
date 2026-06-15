@@ -1,12 +1,12 @@
 [package]
 name = "flowdb"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 authors = ["jinti<shenjindi@fourz.cn>"]
 repository = "https://github.com/restsend/flowdb"
-description = "A high-performance embedded time-series storage engine written in Rust, powered by an LSM-tree architecture."
+description = "A high-performance embedded time-series + JSON document storage engine (LSM-tree), with built-in IndexedDB-compatible API."
 readme = "README.md"
-keywords = ["database", "embedded", "lsm-tree", "persistence", "time-series"]
+keywords = ["database", "embedded", "lsm-tree", "persistence", "time-series", "jsondb", "indexeddb"]
 categories = ["database"]
 license = "MIT"
 

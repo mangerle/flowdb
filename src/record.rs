@@ -477,7 +477,7 @@ impl ScanRange {
     }
 }
 
-fn increment_prefix_bytes(key: &[u8]) -> Vec<u8> {
+pub(crate) fn increment_prefix_bytes(key: &[u8]) -> Vec<u8> {
     let mut bytes = key.to_vec();
     while let Some(last) = bytes.last_mut() {
         if *last < 255 {
