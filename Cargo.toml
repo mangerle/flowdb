@@ -6,7 +6,7 @@ authors = ["jinti<shenjindi@fourz.cn>"]
 repository = "https://github.com/restsend/flowdb"
 description = "A high-performance embedded time-series + JSON document storage engine (LSM-tree), with built-in IndexedDB-compatible API."
 readme = "README.md"
-keywords = ["database", "embedded", "lsm-tree", "persistence", "time-series", "jsondb", "indexeddb"]
+keywords = ["database", "embedded", "lsm-tree", "json", "indexeddb"]
 categories = ["database"]
 license = "MIT"
 
