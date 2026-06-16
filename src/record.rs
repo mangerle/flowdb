@@ -177,7 +177,6 @@ pub struct Config {
     pub memtable_size_mb: usize,
     pub max_frozen_memtables: usize,
     pub block_size: usize,
-    pub zstd_level: i32,
     pub flush_interval_ms: u64,
     pub time_bucket_secs: u64,
     pub index_memory_budget_mb: usize,
@@ -214,7 +213,6 @@ impl Default for Config {
             memtable_size_mb: 64,
             max_frozen_memtables: 2,
             block_size: 8192,
-            zstd_level: 3,
             flush_interval_ms: 1000,
             time_bucket_secs: 3600,
             index_memory_budget_mb: 256,
@@ -253,12 +251,6 @@ impl Config {
             return Err(FlowError::Config(
                 "time_bucket_secs must be >= 1 (0 causes division-by-zero panic)".into(),
             ));
-        }
-        if self.zstd_level < -22 || self.zstd_level > 22 {
-            return Err(FlowError::Config(format!(
-                "zstd_level must be in [-22, 22], got {}",
-                self.zstd_level
-            )));
         }
         if self.bloom_bits_per_key == 0 {
             return Err(FlowError::Config(
@@ -561,7 +553,6 @@ mod tests {
         assert_eq!(config.memtable_size_mb, 64);
         assert_eq!(config.max_frozen_memtables, 2);
         assert_eq!(config.block_size, 8192);
-        assert_eq!(config.zstd_level, 3);
         assert_eq!(config.flush_interval_ms, 1000);
         assert_eq!(config.time_bucket_secs, 3600);
         assert_eq!(config.index_memory_budget_mb, 256);
@@ -679,7 +670,7 @@ mod tests {
 
     #[test]
     fn test_config_serde_defaults() {
-        let json = r#"{"data_dir":"./data","memtable_size_mb":64,"block_size":8192,"zstd_level":3,"flush_interval_ms":1000,"time_bucket_secs":3600,"index_memory_budget_mb":256,"block_cache_capacity_mb":128,"bloom_bits_per_key":10,"wal_segment_size_mb":64,"compaction_threshold":2,"create_if_missing":true,"gc_interval_secs":3600,"max_frozen_memtables":2}"#;
+        let json = r#"{"data_dir":"./data","memtable_size_mb":64,"block_size":8192,"flush_interval_ms":1000,"time_bucket_secs":3600,"index_memory_budget_mb":256,"block_cache_capacity_mb":128,"bloom_bits_per_key":10,"wal_segment_size_mb":64,"compaction_threshold":2,"create_if_missing":true,"gc_interval_secs":3600,"max_frozen_memtables":2}"#;
         let c: Config = serde_json::from_str(json).unwrap();
         assert_eq!(c.wal_sync_mode, SyncMode::Always);
         assert!(c.auto_background);
@@ -746,20 +737,6 @@ mod tests {
     fn test_config_validate_block_size_zero() {
         let cfg = Config {
             block_size: 0,
-            ..Default::default()
-        };
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_config_validate_zstd_out_of_range() {
-        let cfg = Config {
-            zstd_level: 100,
-            ..Default::default()
-        };
-        assert!(cfg.validate().is_err());
-        let cfg = Config {
-            zstd_level: -25,
             ..Default::default()
         };
         assert!(cfg.validate().is_err());

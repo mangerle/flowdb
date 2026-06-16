@@ -10,7 +10,6 @@ use std::sync::Arc;
 pub(crate) struct CompactionRunner {
     data_dir: std::path::PathBuf,
     block_size: usize,
-    zstd_level: i32,
     bloom_bits_per_key: usize,
     compaction_threshold: usize,
     manifest: Arc<parking_lot::Mutex<Manifest>>,
@@ -24,7 +23,6 @@ impl CompactionRunner {
     pub fn new(
         data_dir: std::path::PathBuf,
         block_size: usize,
-        zstd_level: i32,
         bloom_bits_per_key: usize,
         compaction_threshold: usize,
         manifest: Arc<parking_lot::Mutex<Manifest>>,
@@ -35,7 +33,6 @@ impl CompactionRunner {
         Self {
             data_dir,
             block_size,
-            zstd_level,
             bloom_bits_per_key,
             compaction_threshold,
             manifest,
@@ -130,10 +127,8 @@ impl CompactionRunner {
         let mut writer = SstStreamWriter::new(
             &tmp_path,
             self.block_size,
-            self.zstd_level,
             estimated_records,
             self.bloom_bits_per_key,
-            true,
         )?;
 
         let mut last_dedup: Option<(Vec<u8>, i64)> = None;
@@ -354,7 +349,6 @@ mod tests {
         CompactionRunner::new(
             dir.to_path_buf(),
             100,
-            1,
             10,
             threshold,
             Arc::new(parking_lot::Mutex::new(Manifest::open(dir).unwrap())),

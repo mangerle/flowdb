@@ -99,7 +99,6 @@ fn flowdb_config(dir: &Path) -> Config {
         block_size: 8192,
         gc_interval_secs: 999999,
         max_frozen_memtables: 4,
-        zstd_level: 3,
         flush_interval_ms: 60000,
         time_bucket_secs: 3600,
         block_cache_capacity_mb: 128,

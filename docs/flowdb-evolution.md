@@ -383,7 +383,7 @@ v0.3.0 实现了**零 tokio 依赖**：
 tokio                   { version = "1", features = ["full"] }  ← 移除
 serde                   ✓                           ✓
 parking_lot             ✓                           ✓
-zstd                    ✓                           ✓
+zstd                    ✓                           ← 移除 (now only lz4)
 ...                     ✓                           ✓
 ```
 

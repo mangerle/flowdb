@@ -41,7 +41,7 @@ A high-performance embedded storage engine written in Rust, powered by an LSM-tr
 - **Frozen memtable backpressure** — writes stall when flush can't keep up
 - **Lazy scan iterator** (RocksDB-style `ScanIterator`) for bounded-memory range scans
 - Bloom filters for fast point query negative checks
-- Dual compression: lz4 for flush (speed), zstd for compaction (ratio)
+- lz4 compression for all SST blocks (flush + compaction)
 - Buffered WAL writes (256KB buffer) for reduced syscall overhead
 - WAL pre-encoding outside the write lock for better concurrency
 - Time-bucketed block index with binary search

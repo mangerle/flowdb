@@ -66,7 +66,6 @@ impl Engine {
         let readers = self.readers.clone();
         let data_dir = self.config.data_dir.clone();
         let block_size = self.config.block_size;
-        let zstd_level = self.config.zstd_level;
         let bloom_bits = self.config.bloom_bits_per_key;
         let compaction_threshold = self.config.compaction_threshold;
         let flush_interval = self.config.flush_interval_ms.max(1);
@@ -119,7 +118,6 @@ impl Engine {
                             let compaction = crate::compaction::CompactionRunner::new(
                                 data_dir.clone(),
                                 block_size,
-                                zstd_level,
                                 bloom_bits,
                                 compaction_threshold,
                                 manifest.clone(),
@@ -787,7 +785,6 @@ impl Engine {
         let compaction = CompactionRunner::new(
             self.config.data_dir.clone(),
             self.config.block_size,
-            self.config.zstd_level,
             self.config.bloom_bits_per_key,
             self.config.compaction_threshold,
             self.manifest.clone(),
@@ -1445,7 +1442,6 @@ mod tests {
             block_size: 100,
             gc_interval_secs: 3600,
             max_frozen_memtables: 2,
-            zstd_level: 1,
             flush_interval_ms: 60000,
             time_bucket_secs: 3600,
             block_cache_capacity_mb: 16,

@@ -8,7 +8,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 const BLOCK_MAGIC_LZ4: u32 = 0x54534E42;
-const BLOCK_MAGIC_ZSTD: u32 = 0x5A534E42;
 const HEADER_SIZE: usize = 48;
 
 pub(crate) struct SstBlock {
@@ -24,7 +23,6 @@ pub(crate) struct BlockHeader {
     pub max_expire: i64,
     pub data_len: u32,
     pub compressed_len: u32,
-    pub is_zstd: bool,
 }
 
 impl BlockHeader {
@@ -32,11 +30,7 @@ impl BlockHeader {
     /// Layout: magic(4) | num_records(4) | min_ts(8) | max_ts(8) |
     ///         min_expire(8) | max_expire(8) | data_len(4) | compressed_len(4)
     pub fn to_bytes(&self) -> [u8; HEADER_SIZE] {
-        let magic = if self.is_zstd {
-            BLOCK_MAGIC_ZSTD
-        } else {
-            BLOCK_MAGIC_LZ4
-        };
+        let magic = BLOCK_MAGIC_LZ4;
         let mut buf = [0u8; HEADER_SIZE];
         let mut pos = 0;
         buf[pos..pos + 4].copy_from_slice(&magic.to_be_bytes());
@@ -68,16 +62,12 @@ impl BlockHeader {
             });
         }
         let magic = u32::from_be_bytes(data[..4].try_into().unwrap());
-        let is_zstd = match magic {
-            BLOCK_MAGIC_LZ4 => false,
-            BLOCK_MAGIC_ZSTD => true,
-            _ => {
-                return Err(FlowError::InvalidMagic {
-                    expected: BLOCK_MAGIC_LZ4,
-                    actual: magic,
-                });
-            }
-        };
+        if magic != BLOCK_MAGIC_LZ4 {
+            return Err(FlowError::InvalidMagic {
+                expected: BLOCK_MAGIC_LZ4,
+                actual: magic,
+            });
+        }
         Ok(Self {
             num_records: u32::from_be_bytes(data[4..8].try_into().unwrap()),
             min_ts: i64::from_be_bytes(data[8..16].try_into().unwrap()),
@@ -86,19 +76,13 @@ impl BlockHeader {
             max_expire: i64::from_be_bytes(data[32..40].try_into().unwrap()),
             data_len: u32::from_be_bytes(data[40..44].try_into().unwrap()),
             compressed_len: u32::from_be_bytes(data[44..48].try_into().unwrap()),
-            is_zstd,
         })
     }
 }
 
 fn decompress_block(data: &[u8], header: &BlockHeader) -> Result<Vec<u8>> {
-    if header.is_zstd {
-        zstd::bulk::decompress(data, header.data_len as usize)
-            .map_err(|e| FlowError::Other(format!("zstd decompress: {}", e)))
-    } else {
-        lz4_flex::block::decompress(data, header.data_len as usize)
-            .map_err(|e| FlowError::Other(format!("lz4 decompress: {}", e)))
-    }
+    lz4_flex::block::decompress(data, header.data_len as usize)
+        .map_err(|e| FlowError::Other(format!("lz4 decompress: {}", e)))
 }
 
 /// Encodes records into a compact binary buffer (big-endian, no compression).
@@ -203,9 +187,7 @@ impl SstWriter {
         path: &Path,
         records: &[InternalRecord],
         block_size: usize,
-        zstd_level: i32,
         bloom_bits_per_key: usize,
-        use_zstd: bool,
     ) -> Result<(u64, Vec<BlockInfo>, BloomFilter)> {
         let mut file = std::fs::File::create(path)?;
         let mut block_infos = Vec::new();
@@ -224,11 +206,7 @@ impl SstWriter {
         for chunk in records.chunks(block_size.max(1)) {
             let raw_data = encode_records(chunk);
             let data_len = raw_data.len() as u32;
-            let compressed = if use_zstd {
-                zstd::bulk::compress(&raw_data, zstd_level)?
-            } else {
-                lz4_flex::block::compress(&raw_data)
-            };
+            let compressed = lz4_flex::block::compress(&raw_data);
             let compressed_len = compressed.len() as u32;
 
             let min_ts = chunk.iter().map(|r| r.ts).min().unwrap_or(0);
@@ -247,7 +225,6 @@ impl SstWriter {
                 max_expire,
                 data_len,
                 compressed_len,
-                is_zstd: use_zstd,
             };
 
             let header_bytes = header.to_bytes();
@@ -283,8 +260,6 @@ impl SstWriter {
 pub(crate) struct SstStreamWriter {
     file: std::fs::File,
     block_size: usize,
-    zstd_level: i32,
-    use_zstd: bool,
     bloom: BloomFilter,
     current_block: Vec<InternalRecord>,
     block_infos: Vec<BlockInfo>,
@@ -296,18 +271,14 @@ impl SstStreamWriter {
     pub fn new(
         path: &std::path::Path,
         block_size: usize,
-        zstd_level: i32,
         estimated_keys: usize,
         bloom_bits_per_key: usize,
-        use_zstd: bool,
     ) -> Result<Self> {
         let file = std::fs::File::create(path)?;
         let bloom = BloomFilter::with_bits_per_key(estimated_keys.max(1), bloom_bits_per_key);
         Ok(Self {
             file,
             block_size,
-            zstd_level,
-            use_zstd,
             bloom,
             current_block: Vec::with_capacity(block_size),
             block_infos: Vec::new(),
@@ -351,11 +322,7 @@ impl SstStreamWriter {
 
         let raw_data = encode_records(&self.current_block);
         let data_len = raw_data.len() as u32;
-        let compressed = if self.use_zstd {
-            zstd::bulk::compress(&raw_data, self.zstd_level)?
-        } else {
-            lz4_flex::block::compress(&raw_data)
-        };
+        let compressed = lz4_flex::block::compress(&raw_data);
         let compressed_len = compressed.len() as u32;
 
         let min_ts = self.current_block.iter().map(|r| r.ts).min().unwrap_or(0);
@@ -392,7 +359,6 @@ impl SstStreamWriter {
             max_expire,
             data_len,
             compressed_len,
-            is_zstd: self.use_zstd,
         };
 
         let header_bytes = header.to_bytes();
@@ -610,7 +576,7 @@ mod tests {
         let path = dir.path().join("test.sst");
         let records = make_records(100);
 
-        let (bytes, block_infos, _) = SstWriter::write(&path, &records, 10, 3, 10, false).unwrap();
+        let (bytes, block_infos, _) = SstWriter::write(&path, &records, 10, 10).unwrap();
         assert!(bytes > 0);
         assert_eq!(block_infos.len(), 10);
 
@@ -628,7 +594,7 @@ mod tests {
         let path = dir.path().join("test.sst");
         let records = make_records(50);
 
-        let (_, block_infos, _) = SstWriter::write(&path, &records, 10, 3, 10, false).unwrap();
+        let (_, block_infos, _) = SstWriter::write(&path, &records, 10, 10).unwrap();
         let reader = SstReader::open(&path, 1, block_infos.len()).unwrap();
 
         let mut all_records = Vec::new();
@@ -649,7 +615,7 @@ mod tests {
         let path = dir.path().join("test.sst");
         let records = make_records(20);
 
-        let (_, block_infos, _) = SstWriter::write(&path, &records, 10, 3, 10, false).unwrap();
+        let (_, block_infos, _) = SstWriter::write(&path, &records, 10, 10).unwrap();
         assert_eq!(block_infos.len(), 2);
 
         assert_eq!(block_infos[0].min_key, b"key_0000");
@@ -679,7 +645,7 @@ mod tests {
             .collect();
 
         let path = dir.path().join("compressed.sst");
-        let (bytes, _, _) = SstWriter::write(&path, &records, 100, 3, 10, false).unwrap();
+        let (bytes, _, _) = SstWriter::write(&path, &records, 100, 10).unwrap();
 
         let raw_size: usize = records.iter().map(|r| r.estimated_size()).sum();
         assert!(bytes < raw_size as u64);
@@ -689,7 +655,7 @@ mod tests {
     fn test_sst_stream_writer_empty() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("empty.sst");
-        let writer = SstStreamWriter::new(&path, 10, 3, 0, 10, false).unwrap();
+        let writer = SstStreamWriter::new(&path, 10, 0, 10).unwrap();
         let (bytes, blocks, _bloom) = writer.finish().unwrap();
         assert_eq!(bytes, 0, "empty writer produces zero bytes");
         assert!(blocks.is_empty());
@@ -700,7 +666,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("single.sst");
         let records = make_records(5);
-        let mut writer = SstStreamWriter::new(&path, 100, 3, 5, 10, false).unwrap();
+        let mut writer = SstStreamWriter::new(&path, 100, 5, 10).unwrap();
         for rec in &records {
             writer.write_record(rec).unwrap();
         }
@@ -730,7 +696,7 @@ mod tests {
         let path = dir.path().join("multi.sst");
         let records = make_records(25);
         // block_size = 10 → 3 blocks (10 + 10 + 5)
-        let mut writer = SstStreamWriter::new(&path, 10, 3, 25, 10, false).unwrap();
+        let mut writer = SstStreamWriter::new(&path, 10, 25, 10).unwrap();
         for rec in &records {
             writer.write_record(rec).unwrap();
         }
@@ -765,13 +731,13 @@ mod tests {
 
         let records = make_records(50);
         // Stream write
-        let mut sw = SstStreamWriter::new(&s_path, 10, 3, 50, 10, false).unwrap();
+        let mut sw = SstStreamWriter::new(&s_path, 10, 50, 10).unwrap();
         for rec in &records {
             sw.write_record(rec).unwrap();
         }
         let (_, s_blocks, _) = sw.finish().unwrap();
         // Batch write
-        let (_, b_blocks, _) = SstWriter::write(&b_path, &records, 10, 3, 10, false).unwrap();
+        let (_, b_blocks, _) = SstWriter::write(&b_path, &records, 10, 10).unwrap();
 
         assert_eq!(s_blocks.len(), b_blocks.len());
 

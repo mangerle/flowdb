@@ -140,9 +140,7 @@ impl WriteWorker {
             &tmp_path,
             &all_records,
             self.config.block_size,
-            self.config.zstd_level,
             self.config.bloom_bits_per_key,
-            false,
         )?;
 
         std::fs::rename(&tmp_path, &sst_path)?;

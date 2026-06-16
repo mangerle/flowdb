@@ -33,7 +33,6 @@ mod tests {
         assert_eq!(config.memtable_size_mb, 64);
         assert_eq!(config.max_frozen_memtables, 2);
         assert_eq!(config.block_size, 8192);
-        assert_eq!(config.zstd_level, 3);
         assert_eq!(config.flush_interval_ms, 1000);
         assert_eq!(config.time_bucket_secs, 3600);
         assert_eq!(config.index_memory_budget_mb, 256);

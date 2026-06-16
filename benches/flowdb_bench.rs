@@ -36,7 +36,6 @@ fn make_config(dir: &Path) -> Config {
         block_size: 8192,
         gc_interval_secs: 3600,
         max_frozen_memtables: 2,
-        zstd_level: 3,
         flush_interval_ms: 60000,
         time_bucket_secs: 3600,
         block_cache_capacity_mb: 128,
@@ -547,7 +546,7 @@ fn bench_sstable(c: &mut Criterion) {
                     for chunk in records.chunks(block_size) {
                         let raw_data = sst_encode_records(chunk);
                         let data_len = raw_data.len() as u32;
-                        let compressed = zstd::bulk::compress(&raw_data, 3).unwrap();
+                        let compressed = lz4_flex::block::compress(&raw_data);
                         let compressed_len = compressed.len() as u32;
                         let min_ts = chunk.iter().map(|r| r.ts).min().unwrap_or(0);
                         let max_ts = chunk.iter().map(|r| r.ts).max().unwrap_or(0);
@@ -591,7 +590,7 @@ fn bench_sstable(c: &mut Criterion) {
             block_offsets.push(offset);
             let raw_data = sst_encode_records(chunk);
             let data_len = raw_data.len() as u32;
-            let compressed = zstd::bulk::compress(&raw_data, 3).unwrap();
+            let compressed = lz4_flex::block::compress(&raw_data);
             let compressed_len = compressed.len() as u32;
             let min_ts = chunk.iter().map(|r| r.ts).min().unwrap_or(0);
             let max_ts = chunk.iter().map(|r| r.ts).max().unwrap_or(0);
@@ -640,7 +639,7 @@ fn bench_sstable(c: &mut Criterion) {
                                 as usize;
                         let compressed_start = pos + HEADER_SIZE;
                         let compressed_end = compressed_start + compressed_len;
-                        let raw = zstd::bulk::decompress(
+                        let raw = lz4_flex::block::decompress(
                             &file_data[compressed_start..compressed_end],
                             data_len,
                         )
