@@ -4,7 +4,7 @@ use crate::jsondb::encoding::*;
 use crate::jsondb::helpers::*;
 use crate::jsondb::query::QueryBuilder;
 use crate::jsondb::schema::*;
-use crate::jsondb::{KeyArg, Transaction, TransactionMode};
+use crate::jsondb::{KeyArg, ObjectStore, Transaction, TransactionMode};
 use crate::record::{Config, InternalRecord, Record, ScanRange};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -294,6 +294,128 @@ impl JsonDB {
     /// Get a store definition.
     pub fn get_store(&self, name: &str) -> Option<StoreDef> {
         self.schema.get(name)
+    }
+
+    /// Apply a full store definition — create the store and all its indexes,
+    /// or diff against the existing schema and add/remove indexes as needed.
+    ///
+    /// This is the recommended way to set up schema when using the builder
+    /// or derive-macro pattern:
+    ///
+    /// ```no_run
+    /// use flowdb::jsondb::StoreSchema;
+    ///
+    /// # let db = flowdb::jsondb::JsonDB::open(Default::default()).unwrap();
+    /// db.apply_store(
+    ///     StoreSchema::new("users", "id")
+    ///         .with_index("by_email", &["email"], true)
+    ///         .with_index("by_city_age", &["city", "age"], false),
+    /// ).unwrap();
+    /// ```
+    ///
+    /// Semantics:
+    /// - If the store does not exist, it is created with all specified indexes.
+    /// - If the store exists with the same `key_path`, missing indexes are
+    ///   created (with backfill for existing documents) and extra indexes
+    ///   (present on disk but not in `def`) are removed.
+    /// - If the store exists with a different `key_path`, an error is returned.
+    /// - If an index with the same name but different `key_paths` or `unique`
+    ///   exists, an error is returned (manual intervention required).
+    pub fn apply_store(&self, def: &StoreDef) -> Result<()> {
+        let existing = self.schema.get(&def.name);
+
+        match existing {
+            None => {
+                // Store doesn't exist — create it with all indexes.
+                self.create_object_store(&def.name, &def.key_path)?;
+                // Set auto_increment if requested
+                if def.auto_increment {
+                    let mut current = self.schema.get(&def.name).unwrap();
+                    current.auto_increment = true;
+                    self.engine.write_internal(vec![
+                        InternalRecord::from_record(&schema_record(&current)?, 0),
+                    ])?;
+                    self.schema.insert(current);
+                }
+                for idx in &def.indexes {
+                    let paths: Vec<&str> = idx.key_paths.iter().map(|s| s.as_str()).collect();
+                    self.create_index(&def.name, &idx.name, &paths, idx.unique)?;
+                }
+                Ok(())
+            }
+            Some(existing) => {
+                // Store exists — validate key_path.
+                if existing.key_path != def.key_path {
+                    return Err(FlowError::JsonDb(format!(
+                        "store '{}' already exists with a different key_path ('{}' vs '{}')",
+                        def.name, existing.key_path, def.key_path
+                    )));
+                }
+
+                // Detect conflicting indexes (same name, different definition).
+                for idx in &def.indexes {
+                    if let Some(ex_idx) = existing.indexes.iter().find(|i| i.name == idx.name)
+                        && (ex_idx.key_paths != idx.key_paths || ex_idx.unique != idx.unique)
+                    {
+                        return Err(FlowError::JsonDb(format!(
+                            "index '{}' on store '{}' already exists with different \
+                             definition (key_paths={:?}, unique={}) vs requested \
+                             (key_paths={:?}, unique={})",
+                            idx.name, def.name, ex_idx.key_paths, ex_idx.unique,
+                            idx.key_paths, idx.unique,
+                        )));
+                    }
+                }
+
+                // Create missing indexes.
+                for idx in &def.indexes {
+                    if !existing.indexes.iter().any(|i| i.name == idx.name) {
+                        let paths: Vec<&str> = idx.key_paths.iter().map(|s| s.as_str()).collect();
+                        self.create_index(&def.name, &idx.name, &paths, idx.unique)?;
+                    }
+                }
+
+                // Remove extra indexes (present on disk but not in desired def).
+                for ex_idx in &existing.indexes {
+                    if !def.indexes.iter().any(|i| i.name == ex_idx.name) {
+                        self.delete_index(&def.name, &ex_idx.name)?;
+                    }
+                }
+
+                Ok(())
+            }
+        }
+    }
+
+    /// Apply multiple store definitions at once.
+    ///
+    /// Calls [`apply_store`](Self::apply_store) for each definition.
+    pub fn apply_schemas(&self, stores: &[StoreDef]) -> Result<()> {
+        for def in stores {
+            self.apply_store(def)?;
+        }
+        Ok(())
+    }
+
+    /// Apply the schema defined by a typed [`ObjectStore`] implementor.
+    ///
+    /// This is the entry point for the derive-macro pattern:
+    ///
+    /// ```no_run
+    /// use flowdb::jsondb::{JsonDB, ObjectStore};
+    ///
+    /// #[derive(ObjectStore)]
+    /// #[store(key_path = "id")]
+    /// struct User {
+    ///     #[index(unique)]
+    ///     email: String,
+    /// }
+    ///
+    /// let db = JsonDB::open(Default::default()).unwrap();
+    /// db.apply_schema::<User>().unwrap();
+    /// ```
+    pub fn apply_schema<T: ObjectStore>(&self) -> Result<()> {
+        self.apply_store(&T::store_def())
     }
 
     // ── direct document operations (implicit transaction) ─────────

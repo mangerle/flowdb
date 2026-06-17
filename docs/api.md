@@ -325,3 +325,103 @@ pub enum SortDir {
     Desc,
 }
 ```
+
+---
+
+## ObjectStore Derive Macro
+
+```rust
+pub use flowdb::ObjectStore;
+
+// Or via the jsondb module:
+pub trait flowdb::jsondb::ObjectStore {
+    fn store_def() -> StoreSchema;
+}
+```
+
+The `#[derive(ObjectStore)]` macro generates `StoreDef` from struct annotations:
+
+```rust
+use flowdb::ObjectStore;
+use flowdb::jsondb::StoreSchema;
+
+#[derive(ObjectStore)]
+#[store(name = "users", key_path = "id")]     // name defaults to struct name
+struct User {
+    id: String,
+    #[index(name = "by_email", unique)]
+    email: String,
+    #[index(name = "by_age")]
+    age: u32,
+}
+```
+
+This generates an `ObjectStore` impl equivalent to:
+
+```rust
+impl ObjectStore for User {
+    fn store_def() -> StoreSchema {
+        StoreSchema::new("users", "id")
+            .with_index("by_email", &["email"], true)
+            .with_index("by_age", &["age"], false)
+    }
+}
+```
+
+Apply via `JsonDB::apply_schema::<T>()`:
+
+```rust
+db.apply_schema::<User>().unwrap();   // one call sets up store + all indexes
+```
+
+### Container attributes (`#[store(...)]`)
+
+| Attribute | Description |
+|-----------|-------------|
+| `key_path = "..."` | **Required.** Primary key field path |
+| `name = "..."` | Store name (defaults to struct name) |
+| `auto_increment` | Enable auto-increment primary keys |
+
+### Field attributes (`#[index(...)]`)
+
+| Attribute | Description |
+|-----------|-------------|
+| `unique` | Create a unique index |
+| `name = "..."` | Custom index name (defaults to field name) |
+
+---
+
+## StoreDef Builder
+
+```rust
+impl StoreSchema {
+    pub fn new(name: &str, key_path: &str) -> Self;
+    pub fn with_index(self, name: &str, key_paths: &[&str], unique: bool) -> Self;
+    pub fn with_auto_increment(self) -> Self;
+}
+```
+
+Example:
+
+```rust
+let def = StoreSchema::new("users", "id")
+    .with_index("by_email", &["email"], true)
+    .with_index("by_city_age", &["city", "age"], false);
+
+db.apply_store(&def).unwrap();
+```
+
+## JsonDB — Schema Apply Methods
+
+```rust
+pub fn JsonDB::apply_store(&self, def: &StoreDef) -> Result<()>
+pub fn JsonDB::apply_schemas(&self, stores: &[StoreDef]) -> Result<()>
+pub fn JsonDB::apply_schema<T: ObjectStore>(&self) -> Result<()>
+```
+
+`apply_store` is idempotent — it diffs against the persisted schema and:
+- Creates missing stores
+- Creates missing indexes (with backfill for existing documents)
+- Removes extra indexes
+- Errors on conflicting index definitions
+```

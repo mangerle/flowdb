@@ -20,6 +20,29 @@ pub use query::{QueryBuilder, SortDir};
 pub use schema::{IndexDef as IndexSchema, StoreDef as StoreSchema};
 pub use transaction::Transaction;
 
+/// Trait implemented by the [`ObjectStore`](derive@ObjectStore) derive macro.
+///
+/// Provides a [`StoreDef`] that can be applied via [`JsonDB::apply_store`].
+///
+/// # Example
+///
+/// ```ignore
+/// use flowdb::jsondb::ObjectStore;
+///
+/// #[derive(ObjectStore)]
+/// #[store(key_path = "id")]
+/// struct User {
+///     #[index(unique)]
+///     email: String,
+///     #[index]
+///     age: u32,
+/// }
+/// ```
+pub trait ObjectStore {
+    /// Returns the [`StoreDef`] for this struct, including all annotated indexes.
+    fn store_def() -> StoreSchema;
+}
+
 /// Trait for types that can be used as a primary key argument.
 ///
 /// Implemented for `&str`, `String`, `i64`, `i32`, `u64`, `u32`, `Value`, and `&Value`.

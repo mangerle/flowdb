@@ -32,12 +32,13 @@
 //! API with object stores, secondary indexes, ACID transactions, and serde integration.
 //!
 //! ```no_run
-//! use flowdb::jsondb::{JsonDB, TransactionMode};
+//! use flowdb::jsondb::{JsonDB, StoreSchema};
 //! use serde_json::json;
 //!
 //! let db = JsonDB::open(Default::default()).unwrap();
-//! db.create_object_store("users", "id").unwrap();
-//! db.create_index("users", "by_email", &["email"], true).unwrap();
+//! db.apply_store(&StoreSchema::new("users", "id")
+//!     .with_index("by_email", &["email"], true)
+//! ).unwrap();
 //! db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
 //! let doc = db.get("users", &json!("u1")).unwrap();
 //! ```
@@ -69,6 +70,7 @@ mod write_worker;
 
 pub use engine::{Engine, MaintenanceHandle, ScanIterator};
 pub use error::{FlowError, Result};
+pub use flowdb_derive::ObjectStore;
 pub use record::{Config, KeyFilter, Op, Query, ReadOptions, Record, ScanRange, SyncMode};
 pub use stats::EngineStats;
 

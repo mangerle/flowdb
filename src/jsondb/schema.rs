@@ -62,6 +62,16 @@ impl<'de> Deserialize<'de> for IndexDef {
 
 /// Definition of an object store (analogous to a table in SQL or an
 /// object store in IndexedDB).
+///
+/// Construct one via [`StoreDef::new`] and optionally chain builder methods:
+///
+/// ```no_run
+/// use flowdb::jsondb::StoreSchema;
+///
+/// let users = StoreSchema::new("users", "id")
+///     .with_index("by_email", &["email"], true)
+///     .with_index("by_city_age", &["city", "age"], false);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreDef {
     /// Store name (unique within a JsonDB instance).
@@ -76,6 +86,49 @@ pub struct StoreDef {
     pub indexes: Vec<IndexDef>,
     /// Next auto-increment ID (only meaningful when `auto_increment` is true).
     pub next_auto_id: u64,
+}
+
+impl StoreDef {
+    /// Create a new store definition with the given `name` and `key_path`.
+    ///
+    /// Equivalent to the old style:
+    /// ```ignore
+    /// db.create_object_store("users", "id")?;
+    /// ```
+    pub fn new(name: &str, key_path: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            key_path: key_path.to_string(),
+            auto_increment: false,
+            indexes: Vec::new(),
+            next_auto_id: 0,
+        }
+    }
+
+    /// Add a secondary index to this store definition (builder pattern).
+    ///
+    /// Equivalent to the old style:
+    /// ```ignore
+    /// db.create_index("users", "by_email", &["email"], true)?;
+    /// ```
+    pub fn with_index(mut self, name: &str, key_paths: &[&str], unique: bool) -> Self {
+        self.indexes.push(IndexDef {
+            name: name.to_string(),
+            key_paths: key_paths.iter().map(|s| s.to_string()).collect(),
+            unique,
+            multi_entry: false,
+        });
+        self
+    }
+
+    /// Enable auto-increment on this store (builder pattern).
+    ///
+    /// When enabled, the primary key is auto-generated as a monotonically
+    /// increasing integer on [`JsonDB::put_auto`].
+    pub fn with_auto_increment(mut self) -> Self {
+        self.auto_increment = true;
+        self
+    }
 }
 
 /// Thread-safe in-memory cache of all store schemas.

@@ -40,6 +40,9 @@ db.create_object_store("users", "id").unwrap();
 
 The second argument `"id"` specifies the **key path** — the document field used as the primary key.
 
+> **New in v0.7:** You can also use [`StoreDef` builder](#storedef-builder) or the
+> [`#[derive(ObjectStore)]`](#derive-macro) macro — see below.
+
 #### 3. Create Secondary Indexes
 
 ```rust
@@ -160,6 +163,97 @@ for idx in &store.indexes {
 ```rust
 db.shutdown().unwrap();
 ```
+
+---
+
+## StoreDef Builder (v0.7+)
+
+Instead of calling `create_object_store` + `create_index` separately, use the `StoreDef` builder to define the entire schema in one place:
+
+```rust
+use flowdb::jsondb::StoreSchema;
+
+let schema = StoreSchema::new("users", "id")
+    .with_index("by_email", &["email"], true)
+    .with_index("by_city_age", &["city", "age"], false);
+
+db.apply_store(&schema).unwrap();
+```
+
+`apply_store` is idempotent — safe to call on every startup. It automatically:
+- Creates the store if it doesn't exist
+- Creates missing indexes (with backfill for existing data)
+- Removes extra indexes
+
+Apply multiple stores at once:
+
+```rust
+db.apply_schemas(&[
+    StoreSchema::new("users", "id").with_index("by_email", &["email"], true),
+    StoreSchema::new("posts", "id").with_index("by_author", &["author_id"], false),
+]).unwrap();
+```
+
+---
+
+## Derive Macro (v0.7+)
+
+For even less boilerplate, use `#[derive(ObjectStore)]` to generate the `StoreDef` from your struct definition:
+
+```toml
+[dependencies]
+flowdb = "0.7"
+```
+
+```rust
+use flowdb::ObjectStore;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize, ObjectStore)]
+#[store(name = "users", key_path = "id")]
+struct User {
+    id: String,
+    #[index(name = "by_email", unique)]
+    email: String,
+    #[index(name = "by_age")]
+    age: u32,
+    city: String,
+}
+```
+
+Then apply in one call:
+
+```rust
+db.apply_schema::<User>().unwrap();
+```
+
+The macro generates:
+
+```rust
+impl ObjectStore for User {
+    fn store_def() -> StoreSchema {
+        StoreSchema::new("users", "id")
+            .with_index("by_email", &["email"], true)
+            .with_index("by_age", &["age"], false)
+    }
+}
+```
+
+### Container attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `key_path = "..."` | **Required.** Primary key field path |
+| `name = "..."` | Store name (defaults to struct name) |
+| `auto_increment` | Enable auto-increment primary keys |
+
+### Field attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `#[index]` | Create a non-unique index |
+| `#[index(unique)]` | Create a unique index |
+| `#[index(name = "custom")]` | Custom index name (defaults to field name) |
 
 ### Full Working Example
 

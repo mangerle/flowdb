@@ -126,15 +126,17 @@ This extracts the `Bearer` token from the `Authorization` header, looks up the s
 When the server starts, initialise the object stores and indexes:
 
 ```rust
-db.create_object_store("users", "id").unwrap();
-db.create_index("users", "by_email", &["email"], true).unwrap();
+use flowdb::jsondb::StoreSchema;
 
-db.create_object_store("sessions", "token").unwrap();
-db.create_index("sessions", "by_user", &["user_id"], false).unwrap();
-
-db.create_object_store("todos", "id").unwrap();
-db.create_index("todos", "by_user_status", &["user_id", "status"], false).unwrap();
-db.create_index("todos", "by_user_priority", &["user_id", "priority"], false).unwrap();
+db.apply_schemas(&[
+    StoreSchema::new("users", "id")
+        .with_index("by_email", &["email"], true),
+    StoreSchema::new("sessions", "token")
+        .with_index("by_user", &["user_id"], false),
+    StoreSchema::new("todos", "id")
+        .with_index("by_user_status", &["user_id", "status"], false)
+        .with_index("by_user_priority", &["user_id", "priority"], false),
+]).unwrap();
 ```
 
 ---

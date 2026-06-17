@@ -1,20 +1,44 @@
 //! FlowDB JsonDB — JSON document store example.
 //!
 //! Demonstrates object stores, secondary indexes, CRUD on documents,
-//! queries with predicates, compound indexes, auto-increment keys,
-//! transactions, and serde integration.
+//! queries with predicates, compound indexes, transactions,
+//! StoreDef builder, and the ObjectStore derive macro.
 
-use flowdb::jsondb::{JsonDB, SortDir, TransactionMode};
-use flowdb::Config;
+use flowdb::jsondb::{JsonDB, SortDir, StoreSchema, TransactionMode};
+use flowdb::{Config, ObjectStore};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[derive(Debug, Serialize, Deserialize)]
+// ── Derive macro style (new!) ──────────────────────────────────────
+//
+// The `#[derive(ObjectStore)]` macro generates a `StoreDef` from the
+// struct definition, so you don't need to call create_object_store /
+// create_index manually.  Use `db.apply_schema::<T>()` once at startup.
+//
+// Attributes:
+//   #[store(key_path = "...")]  — required, sets the primary key field
+//   #[index]                    — creates a non-unique index on the field
+//   #[index(unique)]            — creates a unique index
+//   #[index(name = "...")]      — custom index name (defaults to field name)
+
+#[derive(Debug, Serialize, Deserialize, ObjectStore)]
+#[store(name = "users", key_path = "id")]
 struct User {
     id: String,
+    #[index(name = "by_email", unique)]
     email: String,
+    #[index(name = "by_age")]
     age: u32,
     city: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Deserialize, ObjectStore)]
+#[store(key_path = "id")]
+struct Log {
+    #[index(name = "by_level")]
+    level: String,
+    msg: String,
 }
 
 fn main() {
@@ -25,10 +49,25 @@ fn main() {
     })
     .unwrap();
 
-    // ── 1. Create store + indexes ─────────────────────────────────
-    db.create_object_store("users", "id").unwrap();
-    db.create_index("users", "by_email", &["email"], true).unwrap();   // unique
-    db.create_index("users", "by_city_age", &["city", "age"], false).unwrap(); // compound
+    // ── 0a. Apply schema via derive macro ─────────────────────────
+    // This single call creates the "users" store, sets key_path="id",
+    // and creates both indexes (by_email unique, by_age).
+    db.apply_schema::<User>().unwrap();
+
+    // ── 0b. Apply schema via StoreDef builder ─────────────────────
+    // Equivalent to the derive macro above, but using the builder:
+    db.apply_store(
+        &StoreSchema::new("logs", "id")
+            .with_index("by_level", &["level"], false),
+    )
+    .unwrap();
+
+    println!("Schemas applied: users (derived), logs (builder)");
+
+    // ── 1. Old-style API (still works) ────────────────────────────
+    // db.create_object_store("users", "id").unwrap();
+    // db.create_index("users", "by_email", &["email"], true).unwrap();
+    // db.create_index("users", "by_city_age", &["city", "age"], false).unwrap();
 
     // ── 2. Insert documents ───────────────────────────────────────
     let docs = vec![
@@ -58,7 +97,11 @@ fn main() {
         println!("  {} (age {})", doc["email"], doc["age"]);
     }
 
-    // ── 5. Compound index query ──────────────────────────────────
+    // ── 5. Compound index query (index created manually below) ───
+    // Note: the derive macro only created a single-field "age" index,
+    // not a compound index.  Let's add one via the classic API:
+    db.create_index("users", "by_city_age", &["city", "age"], false)
+        .unwrap();
     let results = db
         .query("users")
         .where_eq("city", json!("SF"))
@@ -110,6 +153,11 @@ fn main() {
     for idx in &store.indexes {
         println!("  index {} fields={:?} unique={}", idx.name, idx.key_paths, idx.unique);
     }
+
+    // ── 11. apply_store is idempotent ────────────────────────────
+    // Calling apply_store again with the same def is a no-op.
+    db.apply_schema::<User>().unwrap();
+    println!("apply_schema (idempotent) OK");
 
     db.shutdown().unwrap();
     println!("Done (data in {})", dir.path().display());

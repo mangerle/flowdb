@@ -1,0 +1,16 @@
+[package]
+name = "flowdb-derive"
+version = "0.7.0"
+edition = "2024"
+authors = ["jinti<shenjindi@fourz.cn>"]
+repository = "https://github.com/restsend/flowdb"
+description = "Derive macros for FlowDB — ObjectStore, schema-from-struct."
+license = "MIT"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

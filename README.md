@@ -34,14 +34,31 @@ engine.shutdown()?;
 ### JsonDB Document Store
 
 ```rust
-use flowdb::jsondb::{JsonDB, TransactionMode};
+use flowdb::jsondb::{JsonDB, StoreSchema};
 use serde_json::json;
 
 let db = JsonDB::open(Default::default())?;
-db.create_object_store("users", "id")?;
-db.create_index("users", "by_email", &["email"], true)?;
+db.apply_store(&StoreSchema::new("users", "id")
+    .with_index("by_email", &["email"], true)
+)?;
 db.put("users", json!({"id": "u1", "email": "a@b.com"}))?;
 let doc = db.get("users", &json!("u1"))?;
+```
+
+Or with the derive macro:
+
+```rust
+use flowdb::ObjectStore;
+
+#[derive(ObjectStore)]
+#[store(name = "users", key_path = "id")]
+struct User {
+    id: String,
+    #[index(unique)]
+    email: String,
+}
+
+db.apply_schema::<User>()?;
 ```
 
 **Full API reference → [docs/api.md](docs/api.md)**  
