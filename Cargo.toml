@@ -38,6 +38,9 @@ tempfile = "3"
 criterion = "0.8.2"
 arbitrary = { version = "1", features = ["derive"] }
 rocksdb = "0.24"
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)', 'cfg(coverage_nightly)'] }

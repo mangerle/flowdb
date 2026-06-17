@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FlowDB · Supabase Demo</title>
+<style>
+:root {
+  --bg: #f0f2f5;
+  --surface: #ffffff;
+  --surface-2: #f8f9fb;
+  --border: #e2e5ea;
+  --text: #1a1d23;
+  --text-2: #6b7280;
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  --danger: #ef4444;
+  --danger-hover: #dc2626;
+  --success: #22c55e;
+  --open-bg: #dbeafe;
+  --open-text: #1d4ed8;
+  --done-bg: #dcfce7;
+  --done-text: #16a34a;
+  --radius: 12px;
+  --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  --shadow-lg: 0 10px 25px rgba(0,0,0,0.06), 0 2px 4px rgba(0,0,0,0.04);
+  --transition: 0.2s ease;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg); color: var(--text);
+  min-height: 100vh;
+  display: flex; flex-direction: column;
+  align-items: center;
+  padding: 2rem 1rem;
+}
+.container { width: 100%; max-width: 480px; }
+
+.brand {
+  display: flex; align-items: center; gap: 0.6rem;
+  margin-bottom: 1.5rem;
+}
+.brand-icon {
+  width: 36px; height: 36px;
+  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.1rem; font-weight: 700; color: #fff;
+}
+.brand-text { font-size: 1.2rem; font-weight: 700; letter-spacing: -0.01em; }
+.brand-text span { color: var(--text-2); font-weight: 400; }
+
+.card {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+  margin-bottom: 1rem;
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border);
+  transition: box-shadow var(--transition);
+}
+.card:hover { box-shadow: var(--shadow-lg); }
+.card-title {
+  font-size: 1rem; font-weight: 600;
+  margin-bottom: 1rem;
+  color: var(--text);
+}
+
+.form-group { margin-bottom: 0.85rem; }
+.form-group label {
+  display: block;
+  font-size: 0.8rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-2);
+  margin-bottom: 0.35rem;
+}
+input, select {
+  width: 100%;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.9rem;
+  background: var(--surface);
+  color: var(--text);
+  transition: border-color var(--transition), box-shadow var(--transition);
+  outline: none;
+}
+input:focus, select:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(37,99,235,0.12);
+}
+.input-row { display: flex; gap: 0.5rem; align-items: flex-start; }
+.input-row input { margin-bottom: 0; }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.35rem;
+  padding: 0.6rem 1.1rem;
+  border-radius: 8px;
+  font-size: 0.875rem; font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all var(--transition);
+  text-decoration: none;
+  line-height: 1;
+}
+.btn:active { transform: scale(0.97); }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-hover); box-shadow: 0 2px 8px rgba(37,99,235,0.3); }
+.btn-ghost { background: transparent; color: var(--text-2); border: 1px solid var(--border); }
+.btn-ghost:hover { background: var(--surface-2); border-color: #c4c9d1; }
+.btn-sm { padding: 0.35rem 0.65rem; font-size: 0.78rem; border-radius: 6px; }
+.btn-block { width: 100%; }
+
+.auth-tabs { display: flex; margin-bottom: 1.25rem; border-bottom: 2px solid var(--border); gap: 0; }
+.auth-tab {
+  flex: 1; text-align: center; padding: 0.6rem 0;
+  font-size: 0.85rem; font-weight: 600; color: var(--text-2);
+  cursor: pointer; border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: all var(--transition);
+  background: none; border-left: none; border-right: none; border-top: none;
+}
+.auth-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+.auth-tab:hover:not(.active) { color: var(--text); }
+
+.prio { display: inline-flex; align-items: center; gap: 0.25rem; }
+.prio-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.prio-0 .prio-dot { background: #ef4444; }
+.prio-1 .prio-dot { background: #f97316; }
+.prio-2 .prio-dot { background: #eab308; }
+.prio-3 .prio-dot { background: #22c55e; }
+.prio-4 .prio-dot { background: #3b82f6; }
+.prio-5 .prio-dot { background: #8b5cf6; }
+.prio-label { font-size: 0.78rem; color: var(--text-2); font-weight: 500; }
+
+.badge {
+  display: inline-block;
+  font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+}
+.badge-open { background: var(--open-bg); color: var(--open-text); }
+.badge-done { background: var(--done-bg); color: var(--done-text); }
+
+.todo-list { margin-top: 0.5rem; }
+.todo-item {
+  display: flex; align-items: center; gap: 0.75rem;
+  padding: 0.7rem 0.75rem;
+  border-radius: 8px;
+  transition: background var(--transition);
+}
+.todo-item:hover { background: var(--surface-2); }
+.todo-check {
+  width: 20px; height: 20px; border-radius: 50%;
+  border: 2px solid var(--border);
+  cursor: pointer; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: all var(--transition);
+  background: none; padding: 0;
+}
+.todo-check:hover { border-color: var(--primary); }
+.todo-check.done { background: var(--success); border-color: var(--success); }
+.todo-check.done::after { content: "✓"; color: #fff; font-size: 11px; font-weight: 700; }
+.todo-body { flex: 1; min-width: 0; }
+.todo-title {
+  font-size: 0.9rem; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.todo-title.done-text { text-decoration: line-through; color: var(--text-2); }
+.todo-meta { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.2rem; }
+.todo-actions { display: flex; gap: 0.25rem; opacity: 0; transition: opacity var(--transition); }
+.todo-item:hover .todo-actions { opacity: 1; }
+
+#toast-container {
+  position: fixed; top: 1rem; right: 1rem;
+  display: flex; flex-direction: column; gap: 0.5rem;
+  z-index: 999;
+}
+.toast {
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  font-size: 0.85rem; font-weight: 500;
+  box-shadow: var(--shadow-lg);
+  animation: toast-in 0.3s ease;
+  max-width: 360px;
+}
+.toast-success { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
+.toast-error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
+@keyframes toast-in { from { opacity: 0; transform: translateX(100%); } to { opacity: 1; transform: translateX(0); } }
+.toast-exit { animation: toast-out 0.25s ease forwards; }
+@keyframes toast-out { from { opacity: 1; transform: translateX(0); } to { opacity: 0; transform: translateX(100%); } }
+
+.empty-state { text-align: center; padding: 1.5rem 1rem; color: var(--text-2); }
+.empty-state-icon { font-size: 2rem; margin-bottom: 0.5rem; opacity: 0.4; }
+.empty-state-text { font-size: 0.85rem; }
+
+.user-badge {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  background: var(--surface-2);
+  border-radius: 8px;
+  font-size: 0.8rem; color: var(--text-2);
+  overflow: hidden;
+}
+.user-badge-email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.hidden { display: none !important; }
+.fade-enter { animation: fade-in 0.25s ease; }
+@keyframes fade-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+
+select#todo-priority { width: auto; min-width: 72px; }
+</style>
+</head>
+<body>
+<div id="toast-container"></div>
+<div class="container">
+
+<div class="brand">
+  <div class="brand-icon">&#x2B21;</div>
+  <div class="brand-text">FlowDB <span>&middot; Supabase Demo</span></div>
+</div>
+
+<div id="auth-section" class="card">
+  <div class="auth-tabs">
+    <button class="auth-tab active" id="tab-signin" onclick="switchAuthTab('signin')">Sign In</button>
+    <button class="auth-tab" id="tab-signup" onclick="switchAuthTab('signup')">Sign Up</button>
+  </div>
+
+  <div id="auth-form-signin">
+    <div class="form-group">
+      <label for="email">Email</label>
+      <input id="email" type="email" placeholder="you@example.com" autocomplete="email">
+    </div>
+    <div class="form-group">
+      <label for="password">Password</label>
+      <input id="password" type="password" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" autocomplete="current-password">
+    </div>
+    <button class="btn btn-primary btn-block" onclick="login()">Sign In</button>
+    <p style="text-align:center;margin-top:0.75rem;font-size:0.8rem;color:var(--text-2)">
+      Don&apos;t have an account?
+      <a href="#" onclick="switchAuthTab('signup');return false" style="color:var(--primary);text-decoration:none;font-weight:600">Sign Up</a>
+    </p>
+  </div>
+
+  <div id="auth-form-signup" class="hidden">
+    <div class="form-group">
+      <label for="email2">Email</label>
+      <input id="email2" type="email" placeholder="you@example.com" autocomplete="email">
+    </div>
+    <div class="form-group">
+      <label for="password2">Password</label>
+      <input id="password2" type="password" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" autocomplete="new-password">
+    </div>
+    <button class="btn btn-primary btn-block" onclick="signup()">Create Account</button>
+    <p style="text-align:center;margin-top:0.75rem;font-size:0.8rem;color:var(--text-2)">
+      Already have an account?
+      <a href="#" onclick="switchAuthTab('signin');return false" style="color:var(--primary);text-decoration:none;font-weight:600">Sign In</a>
+    </p>
+  </div>
+</div>
+
+<div id="todos-section" class="hidden">
+  <div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+      <span class="card-title" style="margin-bottom:0">My Todos</span>
+      <div style="display:flex;align-items:center;gap:0.5rem">
+        <div class="user-badge" id="user-badge">
+          <span style="width:20px;height:20px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0" id="user-avatar">U</span>
+          <span class="user-badge-email" id="user-email">user</span>
+        </div>
+        <button class="btn btn-sm btn-ghost" onclick="logout()">Logout</button>
+      </div>
+    </div>
+
+    <div class="input-row">
+      <input id="todo-title" type="text" placeholder="What needs to be done?" autocomplete="off">
+      <select id="todo-priority">
+        <option value="0">p0</option>
+        <option value="1">p1</option>
+        <option value="2" selected>p2</option>
+        <option value="3">p3</option>
+        <option value="4">p4</option>
+        <option value="5">p5</option>
+      </select>
+      <button class="btn btn-primary" onclick="createTodo()" style="white-space:nowrap">+ Add</button>
+    </div>
+  </div>
+
+  <div class="card" id="todos-card">
+    <div id="todo-list" class="todo-list"></div>
+  </div>
+</div>
+
+<footer style="text-align:center;padding:1.5rem 0;font-size:0.75rem;color:var(--text-2)">
+  Powered by <a href="https://github.com/restsend/flowdb" style="color:var(--primary);text-decoration:none;font-weight:600">FlowDB</a>
+  &middot; Embedded engine &middot; No PostgreSQL needed
+</footer>
+
+</div>
+
+<script>
+let TOKEN = localStorage.getItem("token") || "";
+let USER_EMAIL = localStorage.getItem("user_email") || "";
+
+function toast(msg, type) {
+  const c = document.getElementById("toast-container");
+  const el = document.createElement("div");
+  el.className = "toast toast-" + type;
+  el.textContent = msg;
+  c.appendChild(el);
+  setTimeout(() => { el.classList.add("toast-exit"); }, 3500);
+  setTimeout(() => { el.remove(); }, 3800);
+}
+
+async function api(path, opts = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+  const res = await fetch(path, { ...opts, headers });
+  if (res.status === 401) { TOKEN = ""; localStorage.removeItem("token"); localStorage.removeItem("user_email"); render(); throw new Error("Session expired"); }
+  if (!res.ok) {
+    let text;
+    try { text = await res.text(); } catch { text = res.statusText; }
+    throw new Error(text || res.statusText);
+  }
+  return res.json();
+}
+
+function switchAuthTab(tab) {
+  document.getElementById("tab-signin").className = "auth-tab" + (tab === "signin" ? " active" : "");
+  document.getElementById("tab-signup").className = "auth-tab" + (tab === "signup" ? " active" : "");
+  document.getElementById("auth-form-signin").className = tab === "signin" ? "" : "hidden";
+  document.getElementById("auth-form-signup").className = tab === "signup" ? "" : "hidden";
+}
+
+async function signup() {
+  const email = document.getElementById("email2").value;
+  const password = document.getElementById("password2").value;
+  if (!email || !password) return toast("Please fill in both fields", "error");
+  try {
+    const data = await api("/api/signup", { method: "POST", body: JSON.stringify({ email, password }) });
+    TOKEN = data.token; USER_EMAIL = email;
+    localStorage.setItem("token", TOKEN);
+    localStorage.setItem("user_email", email);
+    toast("Account created! Welcome, " + email, "success");
+    render();
+  } catch (e) { toast("Signup failed: " + e.message, "error"); }
+}
+
+async function login() {
+  const email = document.getElementById("email").value;
+  const password = document.getElementById("password").value;
+  if (!email || !password) return toast("Please fill in both fields", "error");
+  try {
+    const data = await api("/api/login", { method: "POST", body: JSON.stringify({ email, password }) });
+    TOKEN = data.token; USER_EMAIL = email;
+    localStorage.setItem("token", TOKEN);
+    localStorage.setItem("user_email", email);
+    toast("Welcome back, " + email, "success");
+    render();
+  } catch (e) { toast("Login failed: " + e.message, "error"); }
+}
+
+function logout() {
+  TOKEN = ""; USER_EMAIL = "";
+  localStorage.removeItem("token");
+  localStorage.removeItem("user_email");
+  render();
+  toast("Logged out", "success");
+}
+
+async function createTodo() {
+  const title = document.getElementById("todo-title").value;
+  const priority = parseInt(document.getElementById("todo-priority").value);
+  if (!title) return toast("Please enter a title", "error");
+  try {
+    await api("/api/todos", { method: "POST", body: JSON.stringify({ title, priority }) });
+    document.getElementById("todo-title").value = "";
+    document.getElementById("todo-title").focus();
+    render();
+  } catch (e) { toast("Failed to create todo: " + e.message, "error"); }
+}
+
+async function toggleStatus(id, current) {
+  const status = current === "done" ? "open" : "done";
+  try {
+    await api("/api/todos/" + id, { method: "PUT", body: JSON.stringify({ status }) });
+    render();
+  } catch (e) { toast("Failed to update: " + e.message, "error"); }
+}
+
+async function deleteTodo(id) {
+  try {
+    await api("/api/todos/" + id, { method: "DELETE" });
+    render();
+    toast("Todo deleted", "success");
+  } catch (e) { toast("Failed to delete: " + e.message, "error"); }
+}
+
+function render() {
+  const authed = !!TOKEN;
+  document.getElementById("auth-section").className = authed ? "card hidden" : "card fade-enter";
+  document.getElementById("todos-section").className = authed ? "fade-enter" : "hidden";
+  if (!authed) return;
+
+  document.getElementById("user-email").textContent = USER_EMAIL || "User";
+  document.getElementById("user-avatar").textContent = (USER_EMAIL || "U")[0].toUpperCase();
+
+  api("/api/todos").then(todos => {
+    const list = document.getElementById("todo-list");
+    if (todos.length === 0) {
+      list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">&#x1F4CB;</div><div class="empty-state-text">No todos yet &mdash; add one above!</div></div>';
+      return;
+    }
+    list.innerHTML = todos.map(t => {
+      const done = t.status === "done";
+      return `<div class="todo-item fade-enter">
+        <button class="todo-check ${done ? "done" : ""}" onclick="toggleStatus('${t.id}','${t.status}')"></button>
+        <div class="todo-body">
+          <div class="todo-title ${done ? "done-text" : ""}">${esc(t.title)}</div>
+          <div class="todo-meta">
+            <span class="prio prio-${t.priority}"><span class="prio-dot"></span><span class="prio-label">p${t.priority}</span></span>
+            <span class="badge badge-${t.status}">${t.status}</span>
+          </div>
+        </div>
+        <div class="todo-actions">
+          <button class="btn btn-sm btn-ghost" onclick="deleteTodo('${t.id}')">&#x2715;</button>
+        </div>
+      </div>`;
+    }).join("");
+  }).catch(e => { toast("Failed to load todos: " + e.message, "error"); });
+}
+
+function esc(s) {
+  const d = document.createElement("div");
+  d.appendChild(document.createTextNode(s));
+  return d.innerHTML;
+}
+
+document.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const authed = !!TOKEN;
+    if (!authed) {
+      const tab = document.querySelector(".auth-tab.active");
+      if (tab && tab.id === "tab-signup") signup();
+      else login();
+    } else {
+      createTodo();
+    }
+  }
+});
+
+render();
+</script>
+</body>
+</html>
