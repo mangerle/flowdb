@@ -51,7 +51,8 @@ impl Drop for MaintenanceHandle {
 /// # Writing
 ///
 /// ```no_run
-/// # let engine = Engine::open(Default::default()).unwrap();
+/// # use flowdb::{Engine, Config};
+/// # let engine = Engine::open(Config::default()).unwrap();
 /// use flowdb::Record;
 ///
 /// engine.write_batch_owned(vec![
@@ -62,7 +63,8 @@ impl Drop for MaintenanceHandle {
 /// # Reading
 ///
 /// ```no_run
-/// # let engine = Engine::open(Default::default()).unwrap();
+/// # use flowdb::{Engine, Config};
+/// # let engine = Engine::open(Config::default()).unwrap();
 /// use flowdb::Query;
 ///
 /// for rec in engine.query(Query::prefix("sensor:")).unwrap() {
@@ -73,7 +75,8 @@ impl Drop for MaintenanceHandle {
 /// # Shutdown
 ///
 /// ```no_run
-/// # let engine = Engine::open(Default::default()).unwrap();
+/// # use flowdb::{Engine, Config};
+/// # let engine = Engine::open(Config::default()).unwrap();
 /// engine.shutdown().unwrap();
 /// ```
 ///

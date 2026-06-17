@@ -20,7 +20,7 @@
 //!
 //! let engine = Engine::open(Config::default()).unwrap();
 //! engine.write_batch(&[Record::new("key", 1_700_000_000_000, b"value".to_vec())]).unwrap();
-//! for result in engine.query(Query::prefix("key"))? {
+//! for result in engine.query(Query::prefix("key")).unwrap() {
 //!     println!("{}", result.key_str());
 //! }
 //! engine.shutdown().unwrap();

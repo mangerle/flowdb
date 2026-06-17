@@ -303,11 +303,12 @@ impl JsonDB {
     /// or derive-macro pattern:
     ///
     /// ```no_run
-    /// use flowdb::jsondb::StoreSchema;
+    /// use flowdb::jsondb::{JsonDB, StoreSchema};
+    /// use flowdb::Config;
     ///
-    /// # let db = flowdb::jsondb::JsonDB::open(Default::default()).unwrap();
+    /// let db = JsonDB::open(Config::default()).unwrap();
     /// db.apply_store(
-    ///     StoreSchema::new("users", "id")
+    ///     &StoreSchema::new("users", "id")
     ///         .with_index("by_email", &["email"], true)
     ///         .with_index("by_city_age", &["city", "age"], false),
     /// ).unwrap();
@@ -401,18 +402,23 @@ impl JsonDB {
     ///
     /// This is the entry point for the derive-macro pattern:
     ///
-    /// ```no_run
-    /// use flowdb::jsondb::{JsonDB, ObjectStore};
-    ///
-    /// #[derive(ObjectStore)]
-    /// #[store(key_path = "id")]
-    /// struct User {
-    ///     #[index(unique)]
-    ///     email: String,
-    /// }
-    ///
-    /// let db = JsonDB::open(Default::default()).unwrap();
-    /// db.apply_schema::<User>().unwrap();
+    /// ```ignore
+    /// // The derive macro is re-exported at flowdb::ObjectStore.
+    /// // Use `use flowdb::ObjectStore;` together with
+    /// // `use flowdb::jsondb::JsonDB;`:
+    /// //
+    /// //   use flowdb::jsondb::JsonDB;
+    /// //   use flowdb::ObjectStore;
+    /// //
+    /// //   #[derive(ObjectStore)]
+    /// //   #[store(key_path = "id")]
+    /// //   struct User {
+    /// //       #[index(unique)]
+    /// //       email: String,
+    /// //   }
+    /// //
+    /// //   let db = JsonDB::open(Default::default()).unwrap();
+    /// //   db.apply_schema::<User>().unwrap();
     /// ```
     pub fn apply_schema<T: ObjectStore>(&self) -> Result<()> {
         self.apply_store(&T::store_def())
