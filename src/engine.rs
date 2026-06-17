@@ -35,6 +35,49 @@ impl Drop for MaintenanceHandle {
     }
 }
 
+/// The core LSM-tree storage engine.
+///
+/// `Engine` provides a fully synchronous key-value API with WAL durability,
+/// Bloom filters, block cache, and background flush/compaction/GC.
+///
+/// # Opening
+///
+/// ```no_run
+/// use flowdb::{Engine, Config};
+///
+/// let engine = Engine::open(Config::default()).unwrap();
+/// ```
+///
+/// # Writing
+///
+/// ```no_run
+/// # let engine = Engine::open(Default::default()).unwrap();
+/// use flowdb::Record;
+///
+/// engine.write_batch_owned(vec![
+///     Record::new("sensor:temp", 1_700_000_000_000, b"22.5".to_vec()),
+/// ]).unwrap();
+/// ```
+///
+/// # Reading
+///
+/// ```no_run
+/// # let engine = Engine::open(Default::default()).unwrap();
+/// use flowdb::Query;
+///
+/// for rec in engine.query(Query::prefix("sensor:")).unwrap() {
+///     println!("{}", rec.key_str());
+/// }
+/// ```
+///
+/// # Shutdown
+///
+/// ```no_run
+/// # let engine = Engine::open(Default::default()).unwrap();
+/// engine.shutdown().unwrap();
+/// ```
+///
+/// If the engine is behind an `Arc`, use [`Engine::close`] instead.
 pub struct Engine {
     config: Config,
     worker: Arc<WritePipeline>,
@@ -181,6 +224,13 @@ impl Engine {
         })
     }
 
+    /// Open (or create) an engine at the configured data directory.
+    ///
+    /// On first call with `create_if_missing: true` (default), the data directory
+    /// and its sub-directories (`WAL/`, `SST/`, `INDEX/`) are created automatically.
+    ///
+    /// If the directory already contains valid data (WAL + SST files), the engine
+    /// recovers by replaying the WAL from the last flushed sequence number.
     pub fn open(config: Config) -> Result<Self> {
         config.validate()?;
         let data_dir = &config.data_dir;
@@ -339,14 +389,26 @@ impl Engine {
         Ok(engine)
     }
 
+    /// Write a batch of records using the engine's default TTL.
+    ///
+    /// This is a borrowed-input variant — the caller retains ownership of `batch`.
     pub fn write_batch(&self, batch: &[Record]) -> Result<()> {
         self.write_batch_ttl(batch, None)
     }
 
+    /// Write a batch of records (owned input, no TTL override).
+    ///
+    /// Equivalent to `write_batch` but takes ownership of the `Vec`, which can
+    /// avoid a clone in some call sites.
     pub fn write_batch_owned(&self, batch: Vec<Record>) -> Result<()> {
         self.write_batch_owned_ttl(batch, None)
     }
 
+    /// Write a batch synchronously, bypassing the background write pipeline.
+    ///
+    /// This method encodes, WAL-logs, and memtable-inserts on the calling thread.
+    /// It is useful when the caller needs a synchronous durability guarantee
+    /// without waiting for the background writer.
     pub fn write_batch_sync(&self, batch: Vec<Record>) -> Result<()> {
         if batch.is_empty() {
             return Ok(());

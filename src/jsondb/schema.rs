@@ -60,12 +60,21 @@ impl<'de> Deserialize<'de> for IndexDef {
     }
 }
 
+/// Definition of an object store (analogous to a table in SQL or an
+/// object store in IndexedDB).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreDef {
+    /// Store name (unique within a JsonDB instance).
     pub name: String,
+    /// Dotted path to the primary key field within each document
+    /// (e.g. `"id"`, `"user.id"`).
     pub key_path: String,
+    /// When true, the primary key is auto-generated as a monotonically
+    /// increasing integer on [`JsonDB::put_auto`].
     pub auto_increment: bool,
+    /// Secondary indexes defined on this store.
     pub indexes: Vec<IndexDef>,
+    /// Next auto-increment ID (only meaningful when `auto_increment` is true).
     pub next_auto_id: u64,
 }
 

@@ -23,7 +23,11 @@ pub use transaction::Transaction;
 /// Trait for types that can be used as a primary key argument.
 ///
 /// Implemented for `&str`, `String`, `i64`, `i32`, `u64`, `u32`, `Value`, and `&Value`.
+///
+/// Used by the serde-typed methods [`JsonDB::get_doc`] and [`JsonDB::delete_doc`]
+/// to accept both string and numeric keys without the caller needing to wrap them in `json!()`.
 pub trait KeyArg {
+    /// Convert `self` into a `serde_json::Value` suitable for use as a document key.
     fn into_value(self) -> Value;
 }
 

@@ -20,6 +20,31 @@ use std::ops::Bound;
 ///
 /// Dropping the transaction without calling `commit` **discards** all
 /// buffered writes — there is no automatic roll-back needed.
+/// An explicit JsonDB transaction.
+///
+/// Created via [`JsonDB::transaction`]. All writes are buffered in memory until
+/// [`commit`](Self::commit) is called, which applies them atomically in a single
+/// batch. Dropping the transaction without calling `commit` discards all buffered
+/// writes (equivalent to a rollback).
+///
+/// # Read-Your-Writes
+///
+/// Within a transaction, subsequent reads (including index lookups) see the
+/// effects of prior buffered writes, providing read-your-writes consistency.
+///
+/// # Example
+///
+/// ```no_run
+/// use flowdb::jsondb::{JsonDB, TransactionMode};
+/// use serde_json::json;
+///
+/// let db = JsonDB::open(Default::default()).unwrap();
+/// db.create_object_store("users", "id").unwrap();
+///
+/// let mut tx = db.transaction(&["users"], TransactionMode::ReadWrite).unwrap();
+/// tx.put("users", json!({"id": "u1"})).unwrap();
+/// tx.commit().unwrap();
+/// ```
 pub struct Transaction<'db> {
     pub(crate) db: &'db JsonDB,
     pub(crate) mode: TransactionMode,

@@ -13,11 +13,30 @@ use std::ops::Bound;
 
 // ── JsonDB ───────────────────────────────────────────────────────
 
-/// A JSON document database built on top of a single FlowDB instance.
+/// A JSON document database built on top of a single FlowDB engine.
 ///
 /// Every document operation is ACID — document writes and secondary-index
-/// updates are applied atomically.  Explicit [`Transaction`]s group multiple
+/// updates are applied atomically. Explicit [`Transaction`]s group multiple
 /// operations into a single atomic batch.
+///
+/// # Object Stores
+///
+/// JsonDB organises documents into **object stores**, each with a named primary
+/// key field (`key_path`). Secondary indexes can be created on any field or
+/// combination of fields, with optional uniqueness constraints.
+///
+/// # Example
+///
+/// ```no_run
+/// use flowdb::jsondb::JsonDB;
+/// use serde_json::json;
+///
+/// let db = JsonDB::open(Default::default()).unwrap();
+/// db.create_object_store("users", "id").unwrap();
+/// db.create_index("users", "by_email", &["email"], true).unwrap();
+/// db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
+/// let doc = db.get("users", &json!("u1")).unwrap();
+/// ```
 ///
 /// # Example
 ///
@@ -60,9 +79,11 @@ impl JsonDB {
         Self::from_engine(engine)
     }
 
-    /// Wrap an already-open FlowDB [`Engine`] with a JsonDB layer.
+    /// Wrap an already-open FlowDB [`Engine`](crate::Engine) with a JsonDB layer.
     ///
-    /// Schemas are loaded lazily on first use and cached.
+    /// Existing schemas (stores and indexes) are automatically recovered from
+    /// the engine's persisted schema records. New schemas can be added after
+    /// construction via [`create_object_store`](Self::create_object_store).
     pub fn from_engine(engine: Engine) -> Result<Self> {
         let schema = load_schemas(|range| {
             let iter = engine.scan(range)?;

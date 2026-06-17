@@ -4,41 +4,78 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
+/// Snapshot of engine statistics.
+///
+/// Returned by [`Engine::stats`]. All latency values are in microseconds.
 #[derive(Debug, Serialize, Clone)]
 pub struct EngineStats {
+    /// Total number of records written since engine start.
     pub total_records_written: u64,
+    /// Total bytes written (raw record values, excluding WAL overhead).
     pub total_bytes_written: u64,
+    /// Total number of records returned by queries.
     pub total_records_read: u64,
+    /// Total number of records that expired and were skipped.
     pub total_records_expired: u64,
+    /// Number of memtable-to-SST flushes completed.
     pub total_flushes: u64,
+    /// Number of garbage-collection runs completed.
     pub total_gc_runs: u64,
+    /// Number of compaction runs completed.
     pub total_compaction_runs: u64,
+    /// Total records purged by garbage collection.
     pub records_purged_by_gc: u64,
+    /// UDP packets received (only applicable when UDP metrics transport is active).
     pub udp_packets_received: u64,
+    /// UDP packets dropped (buffer full or transport error).
     pub udp_packets_dropped: u64,
+    /// Total HTTP requests (only applicable when HTTP metrics endpoint is active).
     pub http_requests_total: u64,
+    /// Current number of records in the active memtable.
     pub memtable_records: usize,
+    /// Current bytes used by the active memtable.
     pub memtable_bytes: usize,
+    /// Number of frozen (immutable) memtables waiting to be flushed.
     pub frozen_memtable_count: usize,
+    /// Number of SST files on disk (active + compacting).
     pub sstable_count: usize,
+    /// Total bytes of all SST files on disk.
     pub sstable_bytes: u64,
+    /// Total bytes of all WAL segments on disk.
     pub wal_bytes: u64,
+    /// Number of entries in the block meta index.
     pub block_meta_index_entries: usize,
+    /// Number of time buckets in the block meta index.
     pub time_index_buckets: usize,
+    /// Block cache hit rate as a fraction `[0.0, 1.0]`.
     pub block_cache_hit_rate: f64,
+    /// Ratio of compressed block size to uncompressed block size.
     pub compression_ratio: f64,
+    /// Write latency p50 in microseconds.
     pub write_latency_p50_us: u64,
+    /// Write latency p90 in microseconds.
     pub write_latency_p90_us: u64,
+    /// Write latency p99 in microseconds.
     pub write_latency_p99_us: u64,
+    /// Query latency p50 in microseconds.
     pub query_latency_p50_us: u64,
+    /// Query latency p90 in microseconds.
     pub query_latency_p90_us: u64,
+    /// Query latency p99 in microseconds.
     pub query_latency_p99_us: u64,
+    /// Flush latency p50 in microseconds.
     pub flush_latency_p50_us: u64,
+    /// Flush latency p90 in microseconds.
     pub flush_latency_p90_us: u64,
+    /// Flush latency p99 in microseconds.
     pub flush_latency_p99_us: u64,
+    /// Engine uptime in seconds.
     pub uptime_secs: u64,
+    /// Unix timestamp (seconds) of the last GC run. 0 if never run.
     pub last_gc_at: i64,
+    /// Unix timestamp (seconds) of the last flush. 0 if never flushed.
     pub last_flush_at: i64,
+    /// Unix timestamp (seconds) of the last compaction. 0 if never compacted.
     pub last_compaction_at: i64,
 }
 

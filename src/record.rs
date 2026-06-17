@@ -31,12 +31,23 @@ pub(crate) mod key_serde {
     }
 }
 
+/// A single key-value record in the LSM engine.
+///
+/// Each record has a binary `key`, a microsecond-precision `ts` timestamp,
+/// an `expire_at` time (in microseconds since epoch), and a binary `value`.
+/// Records with `expire_at <= now` are skipped by queries and eventually
+/// garbage-collected.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
+    /// Binary key. Use [`Record::key_str`] for lossy UTF-8 display.
     #[serde(with = "key_serde")]
     pub key: Vec<u8>,
+    /// Microsecond timestamp (e.g. `SystemTime::now()` as microseconds since Unix epoch).
     pub ts: i64,
+    /// Expiration time in microseconds since Unix epoch.
+    /// Use `i64::MAX` for records that should never expire.
     pub expire_at: i64,
+    /// Binary payload. Any byte sequence is accepted.
     pub value: Vec<u8>,
 }
 
@@ -58,11 +69,19 @@ impl Record {
     }
 }
 
+/// Operation type for a write-batch entry.
+///
+/// `Put` inserts or updates a record. `Delete` removes a specific `(key, ts)`
+/// version. `DeleteRange` removes all records whose keys fall within
+/// `[key, range_end)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Op {
+    /// Insert or update a record.
     #[default]
     Put = 0,
+    /// Delete a specific `(key, ts)` version.
     Delete = 1,
+    /// Delete all records with keys in `[key, range_end)`.
     DeleteRange = 2,
 }
 
@@ -169,33 +188,66 @@ pub enum SyncMode {
     IntervalMs(u64),
 }
 
+/// Engine configuration.
+///
+/// Use `Config::default()` for sensible defaults, or construct inline:
+///
+/// ```no_run
+/// use flowdb::Config;
+///
+/// let config = Config {
+///     data_dir: "./my_data".into(),
+///     memtable_size_mb: 16,
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Data directory path. Created automatically unless `create_if_missing` is false.
     pub data_dir: PathBuf,
+    /// Default TTL (seconds) applied to all records that do not have an explicit `expire_at`.
+    /// `None` means records live forever unless explicitly deleted.
     pub default_ttl_secs: Option<u64>,
+    /// Garbage collection interval in seconds (default: 3600 = 1 hour).
+    /// GC purges SST files whose records have all expired.
     pub gc_interval_secs: u64,
+    /// Active memtable size threshold in MB (default: 64).
+    /// When the active memtable exceeds this, it is frozen and a flush is triggered.
     pub memtable_size_mb: usize,
+    /// Maximum number of frozen (immutable) memtables before write backpressure kicks in
+    /// (default: 2). When this limit is reached, writers block until a flush completes.
     pub max_frozen_memtables: usize,
+    /// SST block size in bytes (default: 8192). Each block is independently compressed.
     pub block_size: usize,
+    /// Background flush interval in milliseconds (default: 1000).
+    /// The background maintenance thread flushes the active memtable at this interval.
     pub flush_interval_ms: u64,
+    /// Time bucket width in seconds (default: 3600). The block-level index groups
+    /// SST records into time buckets for efficient time-range pruning.
     pub time_bucket_secs: u64,
+    /// Memory budget for the block meta index in MB (default: 256).
     pub index_memory_budget_mb: usize,
+    /// Block cache capacity in MB (default: 128). Shared across all SST readers.
     pub block_cache_capacity_mb: usize,
+    /// Bloom filter bits per key (default: 10). Higher values reduce false-positive
+    /// rates at the cost of more memory. Set to 0 to disable bloom filters.
     pub bloom_bits_per_key: usize,
+    /// Maximum WAL segment file size in MB (default: 64).
+    /// When a WAL segment exceeds this size, a new segment is created.
     pub wal_segment_size_mb: u64,
+    /// Number of SST files needed to trigger a compaction (default: 2).
+    /// Higher values reduce write amplification but increase read amplification.
     pub compaction_threshold: usize,
+    /// Auto-create the data directory if it does not exist (default: true).
     pub create_if_missing: bool,
-    /// Controls how the WAL is synchronised to stable storage.
-    /// `Always` guarantees every acknowledged write is on disk before
-    /// returning. `IntervalMs(n)` batches fsync calls up to every _n_
-    /// milliseconds for higher throughput at the cost of potentially
-    /// losing the most recent writes on power failure.
+    /// WAL sync mode (default: `SyncMode::Always`).
+    /// - `Always`: fsync every batch (maximum durability).
+    /// - `IntervalMs(n)`: fsync on a periodic tick (higher throughput, may lose recent writes).
     #[serde(default)]
     pub wal_sync_mode: SyncMode,
-    /// When true, the engine automatically spawns a background task that
-    /// periodically flushes the memtable, compacts SSTables, garbage-collects
-    /// expired data, and syncs the WAL (for `IntervalMs` mode). Set to false
-    /// in tests that want full control over when flush/compact/GC occur.
+    /// Automatically spawn a background maintenance thread for flush, compaction, GC,
+    /// and periodic WAL sync (default: true). Set to false in tests that want full
+    /// manual control over maintenance operations.
     #[serde(default = "default_background")]
     pub auto_background: bool,
 }
@@ -284,16 +336,30 @@ impl Config {
     }
 }
 
+/// Key matching strategy used by [`Query`] and internally by the scan pipeline.
 #[derive(Debug, Clone)]
 pub enum KeyFilter {
+    /// Match all keys starting with the given prefix.
     Prefix(Vec<u8>),
+    /// Match all keys within `[start, end]` (inclusive on both ends).
     Range { start: Vec<u8>, end: Vec<u8> },
+    /// Match every key (full scan).
     All,
 }
 
+/// A query over the LSM engine, specifying key filtering and optional time range.
+///
+/// Construct one of the convenience methods:
+/// - [`Query::prefix`]
+/// - [`Query::key_range`]
+/// - [`Query::time_range`]
+/// - [`Query::prefix_time_range`]
+/// - [`Query::key_time_range`]
 #[derive(Debug, Clone)]
 pub struct Query {
+    /// How to match keys.
     pub key_filter: KeyFilter,
+    /// Optional inclusive time range `(start_micros, end_micros)`.
     pub time_range: Option<(i64, i64)>,
 }
 

@@ -1,3 +1,55 @@
+//! FlowDB — an embedded LSM-tree storage engine with a built-in JSON document database.
+//!
+//! # Overview
+//!
+//! FlowDB is a high-performance embedded storage engine written in Rust, powered by an
+//! LSM-tree architecture with WAL, SSTables, and Bloom filters. It includes **JsonDB**,
+//! an IndexedDB-compatible JSON document layer with ACID transactions and secondary indexes.
+//!
+//! **Fully synchronous API** — no async runtime required. FlowDB uses plain OS threads
+//! for background maintenance, making it runtime-agnostic.
+//!
+//! # LSM Engine
+//!
+//! The core engine (`Engine`) provides a key-value store where each record has a binary key,
+//! microsecond timestamp, expiry time, and binary value. It supports point lookups, prefix
+//! scans, range queries, time-range queries, lazy iterators, and batched writes.
+//!
+//! ```no_run
+//! use flowdb::{Engine, Config, Record, Query};
+//!
+//! let engine = Engine::open(Config::default()).unwrap();
+//! engine.write_batch(&[Record::new("key", 1_700_000_000_000, b"value".to_vec())]).unwrap();
+//! for result in engine.query(Query::prefix("key"))? {
+//!     println!("{}", result.key_str());
+//! }
+//! engine.shutdown().unwrap();
+//! ```
+//!
+//! # JsonDB Document Layer
+//!
+//! JsonDB is a document database built on top of the LSM engine, providing an IndexedDB-like
+//! API with object stores, secondary indexes, ACID transactions, and serde integration.
+//!
+//! ```no_run
+//! use flowdb::jsondb::{JsonDB, TransactionMode};
+//! use serde_json::json;
+//!
+//! let db = JsonDB::open(Default::default()).unwrap();
+//! db.create_object_store("users", "id").unwrap();
+//! db.create_index("users", "by_email", &["email"], true).unwrap();
+//! db.put("users", json!({"id": "u1", "email": "a@b.com"})).unwrap();
+//! let doc = db.get("users", &json!("u1")).unwrap();
+//! ```
+//!
+//! # When to use FlowDB
+//!
+//! - **Embedded databases** — no server process, no external dependencies
+//! - **Edge Functions / Serverless** — embed directly in Wasm or VM functions
+//! - **IoT / Time-series** — efficient time-bucketed index and TTL expiry
+//! - **Offline-first apps** — local-first with eventual sync to remote
+//! - **Testing** — fully isolated backend without Docker or network I/O
+
 pub mod cache;
 pub mod engine;
 pub mod error;

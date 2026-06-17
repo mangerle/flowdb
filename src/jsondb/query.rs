@@ -11,7 +11,9 @@ use std::ops::Bound;
 /// Sort direction for [`QueryBuilder::order_by`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SortDir {
+    /// Ascending order (smallest first).
     Asc,
+    /// Descending order (largest first).
     Desc,
 }
 
