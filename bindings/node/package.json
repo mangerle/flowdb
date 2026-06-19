@@ -1,6 +1,6 @@
 {
   "name": "flowdb",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "IndexedDB-compatible embedded JSON document store for Node.js — powered by FlowDB (Rust)",
   "main": "index.js",
   "types": "dist/index.d.ts",
@@ -27,11 +27,11 @@
     "test": "node -e \"const m = require('./index.js'); const db = m.FlowDB.open({dataDir:'/tmp/test',createIfMissing:true}); db.close(); console.log('ok')\""
   },
   "optionalDependencies": {
-    "flowdb-darwin-arm64": "0.7.2",
-    "flowdb-darwin-x64": "0.7.2",
-    "flowdb-linux-x64-gnu": "0.7.2",
-    "flowdb-linux-arm64-gnu": "0.7.2",
-    "flowdb-win32-x64-msvc": "0.7.2"
+    "flowdb-darwin-arm64": "0.7.3",
+    "flowdb-darwin-x64": "0.7.3",
+    "flowdb-linux-x64-gnu": "0.7.3",
+    "flowdb-linux-arm64-gnu": "0.7.3",
+    "flowdb-win32-x64-msvc": "0.7.3"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3",
