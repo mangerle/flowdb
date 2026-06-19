@@ -11,4 +11,4 @@ bindings/node/node_modules/
 # npm package artifacts
 bindings/node/dist/
 bindings/node/npm/
-bindings/node/artifacts/
+bindings/node/artifacts/index.d.ts
