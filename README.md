@@ -156,6 +156,7 @@ cargo run --example supabase-server   # then open http://localhost:3000
 - IndexedDB-like API — `create_object_store`, `create_index`, `put`, `get`, `delete`, `transaction`
 - Index queries — point lookup (`get_by_index`) and range queries (`range_by_index`)
 - Multi-field indexes via dotted key paths (e.g. `"address.city"`)
+- Primary key null-byte (`\x00`) validation — prevents composite-key separator injection
 
 ---
 
@@ -183,8 +184,8 @@ let config = Config {
 | `compaction_threshold` | `2` | SST file count to trigger compaction |
 | `flush_interval_ms` | `1000` | Background flush interval (ms) |
 | `gc_interval_secs` | `3600` | Garbage collection interval (s) |
-| `time_bucket_secs` | `3600` | Time bucket width for block index |
-| `default_ttl_secs` | `None` | Default TTL for all records (set per-batch via `write_batch_ttl`) |
+| `time_bucket_secs` | `3600` | Time bucket width for block index (max ~9.22e12) |
+| `default_ttl_secs` | `None` | Default TTL for all records (max ~9.22e12, set per-batch via `write_batch_ttl`) |
 | `max_frozen_memtables` | `2` | Max frozen memtables before write backpressure |
 | `index_memory_budget_mb` | `256` | Block meta index memory budget |
 | `wal_segment_size_mb` | `64` | WAL segment file size |

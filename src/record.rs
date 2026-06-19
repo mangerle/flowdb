@@ -207,6 +207,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Default TTL (seconds) applied to all records that do not have an explicit `expire_at`.
     /// `None` means records live forever unless explicitly deleted.
+    /// Maximum safe value is ~9.22 × 10¹² (≈ 292,000 years); larger values
+    /// overflow `i64` microsecond conversion and are rejected by `validate()`.
     pub default_ttl_secs: Option<u64>,
     /// Garbage collection interval in seconds (default: 3600 = 1 hour).
     /// GC purges SST files whose records have all expired.
@@ -224,6 +226,8 @@ pub struct Config {
     pub flush_interval_ms: u64,
     /// Time bucket width in seconds (default: 3600). The block-level index groups
     /// SST records into time buckets for efficient time-range pruning.
+    /// Maximum safe value is ~9.22 × 10¹² (≈ 292,000 years); larger values
+    /// overflow `i64` when converted to microseconds and are rejected by `validate()`.
     pub time_bucket_secs: u64,
     /// Memory budget for the block meta index in MB (default: 256).
     pub index_memory_budget_mb: usize,

@@ -106,6 +106,9 @@ impl Engine {
     /// Unlike an async runtime approach, this uses a plain OS thread and
     /// does **not** require a Tokio context, making FlowDB fully
     /// runtime-agnostic.
+    ///
+    /// Returns `None` if the OS thread could not be spawned (e.g. resource
+    /// exhaustion); an error is logged via `tracing::error!()`.
     pub fn spawn_background_maintenance(&self) -> Option<MaintenanceHandle> {
         let worker = self.worker.clone();
         let manifest = self.manifest.clone();
@@ -693,6 +696,14 @@ impl Engine {
         self.do_write(vec![record])
     }
 
+    /// Read-modify-write a single record by key+ts.
+    ///
+    /// Returns an error if the record does not exist.
+    ///
+    /// This method is safe to call concurrently from multiple threads — it
+    /// holds an internal serialization lock across the read and write so
+    /// that concurrent `patch_record` calls on the same key do not
+    /// produce lost updates.
     pub fn patch_record(
         &self,
         key: &str,

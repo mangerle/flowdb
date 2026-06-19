@@ -57,6 +57,9 @@ pub fn Engine::delete_range(&self, start_key: &str, end_key: &str) -> Result<()>
 pub fn Engine::patch_record(&self, key: &str, ts: i64, new_value: Option<Vec<u8>>, new_ttl_secs: Option<u64>) -> Result<Record>
 ```
 
+> `patch_record` is safe to call concurrently — it holds an internal
+> serialization lock across the read and write, preventing lost updates.
+
 ### Maintenance
 
 ```rust
@@ -123,13 +126,13 @@ impl Record {
 ```rust
 pub struct Config {
     pub data_dir: PathBuf,
-    pub default_ttl_secs: Option<u64>,     // default TTL for all records
+    pub default_ttl_secs: Option<u64>,     // default TTL for all records (max ~9.22e12)
     pub gc_interval_secs: u64,              // default: 3600 (1 hour)
     pub memtable_size_mb: usize,            // default: 64
     pub max_frozen_memtables: usize,        // default: 2
     pub block_size: usize,                  // default: 8192
     pub flush_interval_ms: u64,             // default: 1000
-    pub time_bucket_secs: u64,              // default: 3600
+    pub time_bucket_secs: u64,              // default: 3600 (max ~9.22e12)
     pub index_memory_budget_mb: usize,      // default: 256
     pub block_cache_capacity_mb: usize,     // default: 128
     pub bloom_bits_per_key: usize,          // default: 10
@@ -237,6 +240,10 @@ pub fn JsonDB::put_auto(&self, store: &str, doc: Value) -> Result<Value>
 pub fn JsonDB::count(&self, store: &str) -> Result<usize>
 pub fn JsonDB::scan(&self, store: &str) -> Result<Vec<Value>>
 ```
+
+> **Security:** String primary keys must not contain null bytes (`\x00`).
+> They are rejected at write time (`put`, `put_auto`) to prevent
+> composite-key separator injection.
 
 ### Index Queries
 
@@ -381,6 +388,7 @@ db.apply_schema::<User>().unwrap();   // one call sets up store + all indexes
 | `key_path = "..."` | **Required.** Primary key field path |
 | `name = "..."` | Store name (defaults to struct name) |
 | `auto_increment` | Enable auto-increment primary keys |
+| **Security** | String primary keys must not contain null bytes (`\x00`) — they are rejected at write time to prevent composite-key separator injection.
 
 ### Field attributes (`#[index(...)]`)
 
