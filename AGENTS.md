@@ -9,6 +9,20 @@
 - Run the fuzz suite: `cargo test --test fuzz_tests`
 - Run benches: `cargo bench`
 
+## Lock Ordering
+
+To avoid deadlocks, all background tasks must acquire locks in this order:
+
+```
+cache shard locks → manifest → index → worker (WritePipeline)
+```
+
+- **Flush path**: manifest → index (releases between)
+- **GC path**: index → manifest (separate scopes)
+- **Compaction path**: manifest → index (separate scopes)
+- **Never** hold two locks from this set simultaneously unless the order above
+  is strictly followed.
+
 ## Architecture (v0.3.0+)
 
 FlowDB is a **pure embedded storage engine** with a **fully synchronous API**.

@@ -186,7 +186,14 @@ pub(crate) fn encode_index_value(value: &Value) -> Vec<u8> {
 
 pub(crate) fn encode_primary_key(value: &Value) -> Result<Vec<u8>> {
     match value {
-        Value::String(s) => Ok(s.clone().into_bytes()),
+        Value::String(s) => {
+            if s.contains('\x00') {
+                return Err(FlowError::JsonDb(
+                    "primary key must not contain null byte (\\x00)".into(),
+                ));
+            }
+            Ok(s.clone().into_bytes())
+        }
         Value::Number(n) => Ok(n.to_string().into_bytes()),
         Value::Bool(b) => Ok(b.to_string().into_bytes()),
         Value::Null => Ok(vec![0x00]),
@@ -367,6 +374,17 @@ mod tests {
         assert!(validate_name("").is_err());
         assert!(validate_name("has space").is_err());
         assert!(validate_name("has\x00null").is_err());
+    }
+
+    #[test]
+    fn test_encode_primary_key_rejects_null_bytes() {
+        let err = encode_primary_key(&json!("a\x00b")).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("null byte") || msg.contains("\\x00"),
+            "expected null byte error, got: {}",
+            msg
+        );
     }
 
     #[test]

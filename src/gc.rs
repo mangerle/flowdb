@@ -61,7 +61,9 @@ impl GcRunner {
                 mf.append(&ManifestEntry::GcDeleteSst { sst_id })?;
             }
             let sst_path = self.data_dir.join("SST").join(format!("{:09}.sst", sst_id));
-            let _ = std::fs::remove_file(&sst_path);
+            if let Err(e) = std::fs::remove_file(&sst_path) {
+                tracing::warn!("GC: failed to delete SST file {:?}: {}", sst_path, e);
+            }
         }
 
         self.stats.gc_done(purged);

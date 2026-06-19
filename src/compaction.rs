@@ -156,7 +156,9 @@ impl CompactionRunner {
             for sst_id in &candidates {
                 self.cache.invalidate_sst(*sst_id);
                 let path = sst_dir.join(format!("{:09}.sst", sst_id));
-                let _ = std::fs::remove_file(&path);
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::warn!("Compaction: failed to delete SST file {:?}: {}", path, e);
+                }
                 let mut idx = self.index.write();
                 idx.remove_sst(*sst_id);
                 let mut mf = self.manifest.lock();
@@ -206,7 +208,9 @@ impl CompactionRunner {
         for sst_id in &candidates {
             self.cache.invalidate_sst(*sst_id);
             let path = sst_dir.join(format!("{:09}.sst", sst_id));
-            let _ = std::fs::remove_file(&path);
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!("Compaction: failed to delete SST file {:?}: {}", path, e);
+            }
         }
 
         self.stats.compaction_done();

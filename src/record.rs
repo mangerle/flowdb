@@ -332,6 +332,21 @@ impl Config {
                 "default_ttl_secs must be > 0 if set (0 = instant expiry)".into(),
             ));
         }
+        if let Some(ttl) = self.default_ttl_secs
+            && ttl > i64::MAX as u64 / 1_000_000
+        {
+            return Err(FlowError::Config(
+                "default_ttl_secs is too large (would overflow i64 when converted to microseconds)"
+                    .into(),
+            ));
+        }
+        let max_bucket = i64::MAX as u64 / 1_000_000;
+        if self.time_bucket_secs > max_bucket {
+            return Err(FlowError::Config(
+                "time_bucket_secs is too large (product with 1_000_000 would overflow i64)"
+                    .into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -848,6 +863,28 @@ mod tests {
     fn test_config_validate_ttl_zero() {
         let cfg = Config {
             default_ttl_secs: Some(0),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_ttl_overflow() {
+        // i64::MAX / 1_000_000 ≈ 9.22e12; anything above that overflows
+        // when converted to microseconds.
+        let cfg = Config {
+            default_ttl_secs: Some((i64::MAX as u64 / 1_000_000) + 1),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_time_bucket_overflow() {
+        // time_bucket_secs * 1_000_000 must fit in i64.
+        let max_bucket = i64::MAX as u64 / 1_000_000;
+        let cfg = Config {
+            time_bucket_secs: max_bucket + 1,
             ..Default::default()
         };
         assert!(cfg.validate().is_err());

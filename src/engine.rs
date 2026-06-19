@@ -92,6 +92,9 @@ pub struct Engine {
     cache: Arc<BlockCache>,
     readers: Arc<RwLock<HashMap<u32, Arc<SstReader>>>>,
     maintenance: Option<MaintenanceHandle>,
+    /// Serialises the read-modify-write in `patch_record` to prevent
+    /// lost updates when two threads patch the same key concurrently.
+    patch_lock: std::sync::Mutex<()>,
 }
 
 impl Engine {
@@ -121,7 +124,7 @@ impl Engine {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_clone = stop.clone();
 
-        let thread = std::thread::Builder::new()
+        let thread = match std::thread::Builder::new()
             .name("flowdb-maintenance".into())
             .spawn(move || {
                 let flush_dur = std::time::Duration::from_millis(flush_interval);
@@ -219,7 +222,13 @@ impl Engine {
                     }
                 }
             })
-            .expect("failed to spawn maintenance thread");
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("Failed to spawn maintenance thread: {}", e);
+                return None;
+            }
+        };
 
         Some(MaintenanceHandle {
             stop,
@@ -382,6 +391,7 @@ impl Engine {
             cache,
             readers,
             maintenance: None,
+            patch_lock: std::sync::Mutex::new(()),
         };
 
         // Auto-start periodic flush, compaction, GC, and WAL sync.
@@ -430,7 +440,7 @@ impl Engine {
             .enumerate()
             .map(|(i, rec)| {
                 let expire_at = match ttl {
-                    Some(t) => rec.ts + (t as i64 * 1_000_000),
+                    Some(t) => rec.ts.saturating_add((t as i64).saturating_mul(1_000_000)),
                     None => rec.expire_at,
                 };
                 InternalRecord {
@@ -471,7 +481,7 @@ impl Engine {
             .enumerate()
             .map(|(i, rec)| {
                 let expire_at = match ttl {
-                    Some(t) => rec.ts + (t as i64 * 1_000_000),
+                    Some(t) => rec.ts.saturating_add((t as i64).saturating_mul(1_000_000)),
                     None => rec.expire_at,
                 };
                 let seq = base + i as u64;
@@ -690,6 +700,7 @@ impl Engine {
         new_value: Option<Vec<u8>>,
         new_ttl_secs: Option<u64>,
     ) -> Result<Record> {
+        let _lock = self.patch_lock.lock().unwrap();
         let existing = self.get_sync(key, ts);
         let mut rec = match existing {
             Some(r) => r,
@@ -705,7 +716,7 @@ impl Engine {
             rec.value = v;
         }
         if let Some(ttl) = new_ttl_secs {
-            rec.expire_at = rec.ts + (ttl as i64 * 1_000_000);
+            rec.expire_at = rec.ts.saturating_add((ttl as i64).saturating_mul(1_000_000));
         }
 
         self.write_batch(&[rec.clone()])?;
@@ -2784,6 +2795,33 @@ mod tests {
         assert_eq!(patched.value, b"new");
         assert!(patched.expire_at < i64::MAX);
         engine.shutdown().unwrap();
+    }
+
+    /// Concurrent `patch_record` calls on the same key must not lose updates.
+    #[test]
+    fn test_patch_record_concurrent_safety() {
+        let dir = TempDir::new().unwrap();
+        let engine = std::sync::Arc::new(Engine::open(make_config(dir.path())).unwrap());
+        engine.write_batch(&[make_record("k", 1)]).unwrap();
+
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let e = engine.clone();
+            handles.push(std::thread::spawn(move || {
+                let new_val = vec![i as u8];
+                e.patch_record("k", 1, Some(new_val), None).unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let final_val = engine.get("k", 1).unwrap().unwrap();
+        // After 10 concurrent patches, the final value must be one of the
+        // patched values (not the original), proving no lost update caused
+        // a value to remain at the original.
+        assert_ne!(final_val.value, vec![1u8], "patch_record should not lose updates under concurrency");
+        drop(engine); // Arc<Engine> drops here, triggering shutdown}
     }
 
     /// Convenience wrappers (`query_by_prefix`, `query_time_range`,

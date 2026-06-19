@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const CHECKSUM_LEN: usize = 4;
 
 /// FxHash-inspired fast non-cryptographic hash for WAL integrity checks.
-/// ~10× faster than SipHash (DefaultHasher) on small inputs.
 fn compute_checksum(data: &[u8]) -> [u8; CHECKSUM_LEN] {
     const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
     let mut hash: u64 = 0;
@@ -282,8 +281,10 @@ impl Wal {
             self.create_new_segment(id)?;
         }
 
-        for path in to_delete {
-            let _ = std::fs::remove_file(&path);
+        for path in &to_delete {
+            if let Err(e) = std::fs::remove_file(path) {
+                tracing::warn!("Failed to delete WAL segment {:?}: {}", path, e);
+            }
         }
         Ok(())
     }

@@ -384,8 +384,12 @@ impl SstStreamWriter {
 impl Drop for SstStreamWriter {
     fn drop(&mut self) {
         if !self.flushed && !self.current_block.is_empty() {
-            let _ = self.flush_block();
-            let _ = self.file.sync_all();
+            if let Err(e) = self.flush_block() {
+                tracing::error!("SstStreamWriter::drop: flush_block failed: {}", e);
+            }
+            if let Err(e) = self.file.sync_all() {
+                tracing::error!("SstStreamWriter::drop: sync_all failed: {}", e);
+            }
         }
     }
 }
