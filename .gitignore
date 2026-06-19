@@ -1,3 +1,14 @@
 target/
 Cargo.lock
 data/
+
+# napi-rs generated binaries (platform-specific)
+bindings/node/*.node
+
+# Node.js dependencies
+bindings/node/node_modules/
+
+# npm package artifacts
+bindings/node/dist/
+bindings/node/npm/
+bindings/node/artifacts/

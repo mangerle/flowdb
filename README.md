@@ -5,6 +5,7 @@ A high-performance embedded storage engine written in Rust, powered by an LSM-tr
 **Fully synchronous API** — no async runtime required. FlowDB uses plain OS threads for background maintenance, making it runtime-agnostic. Use it from Tokio, async-std, smol, or plain synchronous code without any wrappers.
 
 [![Crates.io](https://img.shields.io/crates/v/flowdb)](https://crates.io/crates/flowdb)
+[![npm](https://img.shields.io/npm/v/flowdb)](https://www.npmjs.com/package/flowdb)
 [![Docs](https://img.shields.io/badge/docs-api-blue)](docs/api.md)
 [![Tutorials](https://img.shields.io/badge/learn-tutorials-green)](docs/tutorials/index.md)
 
@@ -60,6 +61,34 @@ struct User {
 
 db.apply_schema::<User>()?;
 ```
+
+## Node.js (npm)
+
+```bash
+npm install flowdb
+```
+
+```js
+const { FlowDB } = require('flowdb')
+
+const db = FlowDB.open({ dataDir: './data' })
+await db.createObjectStore('users', 'id')
+await db.createIndex('users', 'byEmail', ['email'], true)
+
+await db.put('users', { id: 'u1', email: 'a@b.com' })
+const doc = await db.get('users', 'u1')
+
+const tx = db.transaction(['users'], 'readwrite')
+tx.put('users', { id: 'u2', email: 'b@b.com' })
+await tx.commit()
+await db.close()
+```
+
+Zero Rust toolchain required. Full IndexedDB-compatible API with ACID transactions.
+
+**Tutorial → [05-nodejs](docs/tutorials/en/05-nodejs.md)**
+
+---
 
 **Full API reference → [docs/api.md](docs/api.md)**  
 

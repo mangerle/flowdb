@@ -101,7 +101,41 @@ benches/
   flowdb_bench.rs     – criterion micro-benchmarks
 examples/
   flowdb-vs-rocksdb.rs – comparative benchmark vs RocksDB
+
+bindings/node/         – napi-rs native Node.js addon
+  src/lib.rs           – #[napi] Rust bindings (FlowDb, JsTransaction)
+  Cargo.toml           – napi crate (workspace member)
+  build.rs             – napi-build setup
+  index.js             – Platform-specific .node loader
+  package.json         – npm package config
+  ts/                  – TypeScript wrapper source
+    index.ts, jsondb.ts, transaction.ts, types.ts
 ```
+
+## napi-rs Node.js Bindings
+
+`bindings/node/` is a Cargo workspace member that builds a native Node.js addon.
+
+### Build (release)
+
+```bash
+cd bindings/node && napi build --platform --release
+```
+
+### Test
+
+```bash
+cd bindings/node && node -e "const m=require('.'); m.FlowDb.open({dataDir:'/tmp/t',createIfMissing:true}).close()"
+```
+
+### Cross-platform publishing
+
+```bash
+napi artifacts                    # generate npm platform packages
+npm publish                      # publish all packages
+```
+
+The TypeScript wrapper in `ts/` is compiled with `tsc` to `dist/`. The `index.js` loader handles platform detection.
 
 ## Test Conventions
 

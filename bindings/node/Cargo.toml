@@ -1,0 +1,18 @@
+[package]
+name = "flowdb-node"
+version = "0.7.2"
+edition = "2024"
+description = "Native Node.js bindings for FlowDB — an IndexedDB-compatible embedded JSON document store"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2", features = ["async", "serde-json", "napi4", "napi6"] }
+napi-derive = "2"
+flowdb = { path = "../../" }
+serde_json = "1"
+
+[build-dependencies]
+napi-build = "2"

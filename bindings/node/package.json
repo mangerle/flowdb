@@ -1,0 +1,53 @@
+{
+  "name": "flowdb",
+  "version": "0.7.2",
+  "description": "IndexedDB-compatible embedded JSON document store for Node.js — powered by FlowDB (Rust)",
+  "main": "index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "index.js",
+    "dist/*.d.ts",
+    "dist/*.d.ts.map"
+  ],
+  "napi": {
+    "binaryName": "flowdb-node",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --release && npx tsc",
+    "build:debug": "napi build --platform && npx tsc",
+    "artifacts": "napi artifacts",
+    "prepublishOnly": "npm run build && node scripts/publish-platforms.js",
+    "test": "node -e \"const m = require('./index.js'); const db = m.FlowDB.open({dataDir:'/tmp/test',createIfMissing:true}); db.close(); console.log('ok')\""
+  },
+  "optionalDependencies": {
+    "flowdb-darwin-arm64": "0.7.2",
+    "flowdb-darwin-x64": "0.7.2",
+    "flowdb-linux-x64-gnu": "0.7.2",
+    "flowdb-linux-arm64-gnu": "0.7.2",
+    "flowdb-win32-x64-msvc": "0.7.2"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3",
+    "typescript": "^5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/restsend/flowdb"
+  },
+  "license": "MIT",
+  "keywords": [
+    "database",
+    "embedded",
+    "json",
+    "indexeddb",
+    "node.js",
+    "napi"
+  ]
+}
